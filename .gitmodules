@@ -1,12 +1,12 @@
 [submodule "hicodet"]
 	path = hicodet
-	url = https://github.com/fredzzhang/hicodet.git
+	url = https://github.com/CristinaZN/hicodet.git
 [submodule "vcoco"]
 	path = vcoco
-	url = https://github.com/fredzzhang/vcoco.git
+	url = https://github.com/CristinaZN/vcoco.git
 [submodule "pocket"]
 	path = pocket
-	url = https://github.com/fredzzhang/pocket.git
+	url = https://github.com/CristinaZN/pocket.git
 [submodule "detr"]
 	path = detr
 	url = https://github.com/fredzzhang/detr.git
