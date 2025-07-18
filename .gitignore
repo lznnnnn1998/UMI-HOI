@@ -133,7 +133,17 @@ dmypy.json
 .pyre/
 
 # logs
-./log/*
-./log/*.txt
-./log/*.pth
-./log/*.py
+log
+log/*
+log/*.txt
+log/*.py
+
+# checkpoints
+log/*.pth
+*.pth
+
+# text
+./figure_candidates.txt
+
+# visualization
+visualization/*
