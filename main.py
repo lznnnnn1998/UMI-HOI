@@ -44,11 +44,11 @@ def main(rank, args):
 
     trainset = DataFactory(
         name=args.dataset, partition=args.partitions[0],
-        data_root=args.data_root
+        data_root=args.data_root, llava_answer_path=args.llava_answer_path, llava_token_path=args.llava_token_path
     )
     testset = DataFactory(
         name=args.dataset, partition=args.partitions[1],
-        data_root=args.data_root
+        data_root=args.data_root, llava_answer_path=args.llava_answer_path, llava_token_path=args.llava_token_path
     )
 
     train_loader = DataLoader(
@@ -155,7 +155,8 @@ if __name__ == '__main__':
         parser = argparse.ArgumentParser(parents=[advanced_detector_args(),])
         parser.add_argument('--detector', default='advanced', type=str)
         parser.add_argument('--raw-lambda', default=1.7, type=float)
-
+    parser.add_argument('--llava-answer-path', type=str)
+    parser.add_argument('--llava-token-path', type=str)
     parser.add_argument('--kv-src', default='C5', type=str, choices=['C5', 'C4', 'C3'])
     parser.add_argument('--repr-dim', default=384, type=int)
     parser.add_argument('--triplet-enc-layers', default=1, type=int)

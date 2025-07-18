@@ -17,7 +17,7 @@ from collections import OrderedDict
 from typing import Optional, Tuple, List
 from torchvision.ops import FeaturePyramidNetwork
 
-from transformers_ import (
+from transformers_vis import (
     TransformerEncoder,
     TransformerDecoder,
     TransformerDecoderLayer,

@@ -36,13 +36,17 @@ from detr.datasets import transforms as T
 def custom_collate(batch):
     images = []
     targets = []
-    for im, tar in batch:
+    llava_answers = []
+    llava_features = []
+    for im, tar, llava_answer, llava_feature in batch:
         images.append(im)
         targets.append(tar)
-    return images, targets
+        llava_answers.append(llava_answer)
+        llava_features.append(llava_feature)
+    return images, targets, llava_answers, llava_features
 
 class DataFactory(Dataset):
-    def __init__(self, name, partition, data_root):
+    def __init__(self, name, partition, data_root, llava_token_path, llava_answer_path):
         if name not in ['hicodet', 'vcoco']:
             raise ValueError("Unknown dataset ", name)
 
@@ -52,7 +56,9 @@ class DataFactory(Dataset):
             self.dataset = HICODet(
                 root=os.path.join(data_root, "hico_20160224_det/images", partition),
                 anno_file=os.path.join(data_root, f"instances_{partition}.json"),
-                target_transform=pocket.ops.ToTensor(input_format='dict')
+                target_transform=pocket.ops.ToTensor(input_format='dict'),
+                llava_answer_path=llava_answer_path,
+                llava_token_path=llava_token_path
             )
         else:
             assert partition in ['train', 'val', 'trainval', 'test'], \
@@ -66,7 +72,9 @@ class DataFactory(Dataset):
             self.dataset = VCOCO(
                 root=os.path.join(data_root, image_dir[partition]),
                 anno_file=os.path.join(data_root, f"instances_vcoco_{partition}.json"),
-                target_transform=pocket.ops.ToTensor(input_format='dict')
+                target_transform=pocket.ops.ToTensor(input_format='dict'),
+                llava_answer_path=llava_answer_path,
+                llava_token_path=llava_token_path
             )
 
         # Prepare dataset transforms
@@ -100,7 +108,9 @@ class DataFactory(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, i):
-        image, target = self.dataset[i]
+        image, target = self.dataset[i][0]
+        llava_answer = self.dataset[i][1]
+        llava_feature = self.dataset[i][2]
         if self.name == 'hicodet':
             target['labels'] = target['verb']
             # Convert ground truth boxes to zero-based index and the
@@ -113,7 +123,7 @@ class DataFactory(Dataset):
 
         image, target = self.transforms(image, target)
 
-        return image, target
+        return image, target, llava_answer, llava_feature
 
 class CacheTemplate(defaultdict):
     """A template for VCOCO cached results """
@@ -141,20 +151,20 @@ class CustomisedDLE(DistributedLearningEngine):
         self.config = config
         self.max_norm = config.clip_max_norm
         self.test_dataloader = test_dataloader
-
+        self.steped = False
     def _on_start(self):
         if self._train_loader.dataset.name == "hicodet":
-            ap = self.test_hico()
+            # ap = self.test_hico()
             if self._rank == 0:
                 # Fetch indices for rare and non-rare classes
-                rare = self.test_dataloader.dataset.dataset.rare
-                non_rare = self.test_dataloader.dataset.dataset.non_rare
-                perf = [ap.mean().item(), ap[rare].mean().item(), ap[non_rare].mean().item()]
-                print(
-                    f"Epoch {self._state.epoch} =>\t"
-                    f"mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}."
-                )
-                self.best_perf = perf[0]
+                # rare = self.test_dataloader.dataset.dataset.rare
+                # non_rare = self.test_dataloader.dataset.dataset.non_rare
+                # perf = [ap.mean().item(), ap[rare].mean().item(), ap[non_rare].mean().item()]
+                # print(
+                #     f"Epoch {self._state.epoch} =>\t"
+                #     f"mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}."
+                # )
+                self.best_perf = 0
                 wandb.init(config=self.config)
                 wandb.watch(self._state.net.module)
                 wandb.define_metric("epochs")
@@ -166,14 +176,16 @@ class CustomisedDLE(DistributedLearningEngine):
                 wandb.define_metric("elapsed_time", step_metric="training_steps", summary="max")
                 wandb.define_metric("loss", step_metric="training_steps", summary="min")
 
-                wandb.log({
-                    "epochs": self._state.epoch, "mAP full": perf[0],
-                    "mAP rare": perf[1], "mAP non_rare": perf[2]
-                })
+                # wandb.log({
+                #     "epochs": self._state.epoch, "mAP full": perf[0],
+                #     "mAP rare": perf[1], "mAP non_rare": perf[2]
+                # })
         else:
-            ap = self.test_vcoco()
+            # ap = self.test_vcoco()
+
             if self._rank == 0:
-                perf = [ap.mean().item(),]
+                # perf = [ap.mean().item(),]
+                perf = [0]
                 print(
                     f"Epoch {self._state.epoch} =>\t"
                     f"mAP: {perf[0]:.4f}."
@@ -189,18 +201,20 @@ class CustomisedDLE(DistributedLearningEngine):
             wandb.finish()
 
     def _on_each_iteration(self):
-        loss_dict = self._state.net(
-            *self._state.inputs, targets=self._state.targets)
-        if loss_dict['cls_loss'].isnan():
-            raise ValueError(f"The HOI loss is NaN for rank {self._rank}")
+        loss_dict, n_p = self._state.net(
+            images=self._state.inputs[0], targets=self._state.inputs[1], llava_answer=self._state.inputs[2], llava_feature=self._state.targets)
+        if n_p != 0:
+            if loss_dict['cls_loss'].isnan():
+                raise ValueError(f"The HOI loss is NaN for rank {self._rank}")
 
-        self._state.loss = sum(loss for loss in loss_dict.values())
-        self._state.optimizer.zero_grad(set_to_none=True)
-        self._state.loss.backward()
-        if self.max_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self._state.net.parameters(), self.max_norm)
-        self._state.optimizer.step()
-
+            self._state.loss = sum(loss for loss in loss_dict.values())
+            self._state.optimizer.zero_grad(set_to_none=True)
+            self._state.loss.backward()
+            if self.max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self._state.net.parameters(), self.max_norm)
+            self._state.optimizer.step()
+        else:
+            pass
     def _print_statistics(self):
         running_loss = self._state.running_loss.mean()
         t_data = self._state.t_data.sum() / self._world_size
@@ -267,12 +281,23 @@ class CustomisedDLE(DistributedLearningEngine):
             }
             if self._state.lr_scheduler is not None:
                 checkpoint['scheduler_state_dict'] = self._state.lr_scheduler.state_dict()
-            torch.save(checkpoint, os.path.join(self._cache_dir, "latest.pth"))
+            torch.save(checkpoint, os.path.join(self._cache_dir, f"epoch_{self._state.epoch}.pth"))
+            if self._train_loader.dataset.name == "hicodet":
+                with open(os.path.join(self._cache_dir, "log.txt"), "a") as f:
+                    f.write(f"Epoch {self._state.epoch} => mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}.\n")
+                    f.close()
+            else:
+                with open(os.path.join(self._cache_dir, "log.txt"), "a") as f:
+                    f.write(f"Epoch {self._state.epoch} => mAP: {perf[0]:.4f}.\n")
+                    f.close()
             if perf[0] > self.best_perf:
                 self.best_perf = perf[0]
                 torch.save(checkpoint, os.path.join(self._cache_dir, "best.pth"))
         if self._state.lr_scheduler is not None:
             self._state.lr_scheduler.step()
+        # if perf[0] > 0.38 and self.steped==False:
+        #     self._state.lr_scheduler.step()
+            self.steped = True
 
     @torch.no_grad()
     def test_hico(self):
@@ -291,11 +316,11 @@ class CustomisedDLE(DistributedLearningEngine):
                 num_gt=dataset.anno_interaction,
             )
         for batch in tqdm(dataloader, disable=(self._world_size != 1)):
-            inputs = pocket.ops.relocate_to_cuda(batch[:-1])
+            inputs = pocket.ops.relocate_to_cuda(batch)
             outputs = net(*inputs)
             outputs = pocket.ops.relocate_to_cpu(outputs, ignore=True)
-            targets = batch[-1]
-
+            targets = batch[1]
+            targets = pocket.ops.relocate_to_cpu(targets, ignore=True)
             scores_clt = []; preds_clt = []; labels_clt = []
             for output, target in zip(outputs, targets):
                 # Format detections
@@ -360,9 +385,13 @@ class CustomisedDLE(DistributedLearningEngine):
         nimages = len(dataset.annotations)
         all_results = np.empty((600, nimages), dtype=object)
 
-        for i, (image, target) in enumerate(tqdm(dataloader.dataset)):
+        for i, batch in enumerate(tqdm(dataloader.dataset)):
+            inputs = pocket.ops.relocate_to_cuda(batch)
+            image = inputs[0]
+            llava_answer=inputs[2]
+            llava_feature=inputs[3]
             inputs = pocket.ops.relocate_to_cuda([image,])
-            output = net(inputs)
+            output = net(images=[image], targets=None, llava_answer=[llava_answer], llava_feature=[llava_feature])
 
             # Skip images without detections
             if output is None or len(output) == 0:
@@ -440,11 +469,11 @@ class CustomisedDLE(DistributedLearningEngine):
                 num_gt=dataset.num_instances,
             )
         for batch in tqdm(dataloader, disable=(self._world_size != 1)):
-            inputs = pocket.ops.relocate_to_cuda(batch[:-1])
+            inputs = pocket.ops.relocate_to_cuda(batch)
             outputs = net(*inputs)
             outputs = pocket.ops.relocate_to_cpu(outputs, ignore=True)
-            targets = batch[-1]
-
+            targets = batch[1]
+            targets = pocket.ops.relocate_to_cpu(targets, ignore=True)
             scores_clt = []; preds_clt = []; labels_clt = []
             for output, target in zip(outputs, targets):
                 # Format detections
@@ -498,9 +527,12 @@ class CustomisedDLE(DistributedLearningEngine):
 
         dataset = dataloader.dataset.dataset
         all_results = []
-        for i, (image, target) in enumerate(tqdm(dataloader.dataset)):
-            inputs = pocket.ops.relocate_to_cuda([image,])
-            output = net(inputs)
+        for i, batch in enumerate(tqdm(dataloader.dataset)):
+            inputs = pocket.ops.relocate_to_cuda(batch)
+            image = inputs[0]
+            llava_answer=inputs[2]
+            llava_feature=inputs[3]
+            output = net(images=[image], targets=None, llava_answer=[llava_answer], llava_feature=[llava_feature])
 
             # Skip images without detections
             if output is None or len(output) == 0:
