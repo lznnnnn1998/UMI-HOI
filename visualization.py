@@ -143,9 +143,10 @@ def visualise_entire_image(
                 attn_map_haed_std = attn_map.flatten(1).std(1)
                 attn_map_th = attn_map_haed_std.sum() / 8
                 attn_map_activated = (attn_map_haed_std >= attn_map_th).long()
+                activated_ids = torch.where(attn_map_activated==1)[0]
                 pocket.utils.draw_boxes(attn_image, torch.stack([bx_h[i], bx_o[i]]), width=4)
                 if args.avg_attn:
-                    pocket.advis.heatmap(attn_image, attn_map.mean(0, keepdim=True), save_path=save_folder+f"pair_{i}_{attn_type}_avg_attn.png")
+                    pocket.advis.heatmap(attn_image, attn_map[activated_ids].mean(0, keepdim=True), save_path=save_folder+f"pair_{i}_{attn_type}_avg_attn.png")
                     plt.close()
                 else:
                     for j in range(8):

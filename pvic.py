@@ -222,6 +222,7 @@ class PViC(nn.Module):
         super().__init__()
 
         self.detector = detector[0]
+        self.detector_type = detector[1]
         self.od_forward = {
             "base": self.base_forward,
             "advanced": self.advanced_forward,
@@ -354,7 +355,7 @@ class PViC(nn.Module):
             init_reference,
             inter_references,
             enc_outputs_class,
-            enc_outputs_coord_unact,
+            enc_outputs_coord_unact, memory
         ) = ctx.transformer(srcs, masks, pos, query_embeds, self_attn_mask)
 
         outputs_classes_one2one = []
@@ -398,7 +399,7 @@ class PViC(nn.Module):
                 "pred_logits": enc_outputs_class,
                 "pred_boxes": enc_outputs_coord,
             }
-        return out, hs, features
+        return out, hs, features, memory, masks, pos, ctx.transformer.level_embed
 
     def forward(self,
         images: List[Tensor],
@@ -439,9 +440,37 @@ class PViC(nn.Module):
         image_sizes = torch.as_tensor([im.size()[-2:] for im in images], device=images[0].device)
 
         with torch.no_grad():
-            results, hs, features = self.od_forward(self.detector, images)
+            if self.detector_type == "advanced":
+                results, hs, features, memory, masks, pos, level_embed = self.od_forward(self.detector, images)
+                # multi-scale:
+                # mask_flatten = []
+                # lvl_pos_embed_flatten = []
+                # for i, m in enumerate(masks):
+                #     mask_flatten.append(m.flatten(1))
+                #     pos_embed = pos[i].flatten(2).transpose(1, 2)
+                #     lvl_pos_embed = pos_embed + level_embed[i].view(1, 1, -1)
+                #     lvl_pos_embed_flatten.append(lvl_pos_embed)
+                # mask_flatten = torch.cat(mask_flatten, 1)
+                # lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
+                # kv_p_m = mask_flatten.unsqueeze(1)
+                # memory = features
+                # k_pos = lvl_pos_embed_flatten
+                # Compute keys/values for triplet decoder. only C5 layer
+                memory, mask = self.feature_head(features)
+                b, h, w, c = memory.shape
+                memory = memory.reshape(b, h * w, c)
+                kv_p_m = mask.reshape(-1, 1, h * w)
+                k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+            elif self.detector_type == "base":
+                results, hs, features = self.od_forward(self.detector, images)
+                # Compute keys/values for triplet decoder.
+                memory, mask = self.feature_head(features)
+                b, h, w, c = memory.shape
+                memory = memory.reshape(b, h * w, c)
+                kv_p_m = mask.reshape(-1, 1, h * w)
+                k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
             results = self.postprocessor(results, image_sizes)
-
+        
         region_props = prepare_region_proposals(
             results, hs[-1], image_sizes,
             box_score_thresh=self.box_score_thresh,
@@ -456,12 +485,7 @@ class PViC(nn.Module):
             paired_inds, prior_scores,
             object_types, positional_embeds
         ) = self.ho_matcher(region_props, image_sizes)
-        # Compute keys/values for triplet decoder.
-        memory, mask = self.feature_head(features)
-        b, h, w, c = memory.shape
-        memory = memory.reshape(b, h * w, c)
-        kv_p_m = mask.reshape(-1, 1, h * w)
-        k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        
         # Enhance visual context with triplet decoder.
         query_embeds = []
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):

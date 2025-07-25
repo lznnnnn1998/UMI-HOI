@@ -272,7 +272,7 @@ class TransformerDecoderLayer(nn.Module):
             key_padding_mask=kv_padding_mask
         )[0]
         queries = self.ln2(queries + self.dp2(qk_attn))
-        llava_answer = self.llava_cali_embedding.weight[llava_answer_idx].unsqueeze(1)
+        llava_answer = self.llava_cali_embedding.weight[llava_answer_idx.unique()].unsqueeze(1)
         llava_queries = self.cross_attn(
             query=self.cross_attn_q_proj(self.query_adapter_ql(queries)),
             key=self.cross_attn_k_proj(llava_answer),

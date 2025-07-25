@@ -295,9 +295,9 @@ class CustomisedDLE(DistributedLearningEngine):
                 torch.save(checkpoint, os.path.join(self._cache_dir, "best.pth"))
         if self._state.lr_scheduler is not None:
             self._state.lr_scheduler.step()
-        # if perf[0] > 0.38 and self.steped==False:
+        # if perf[0] > 0.39 and self.steped==False:
         #     self._state.lr_scheduler.step()
-            self.steped = True
+        #     self.steped = True
 
     @torch.no_grad()
     def test_hico(self):
