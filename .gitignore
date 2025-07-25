@@ -147,3 +147,5 @@ figure_candidates.txt
 
 # visualization
 visualization/*
+*.png
+*.txt
