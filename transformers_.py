@@ -106,87 +106,48 @@ class TransformerDecoderLayer(nn.Module):
         self.num_heads = num_heads
         self.dropout = dropout
         self.ffn_interm_dim = ffn_interm_dim
+        self_attn_dim = q_dim * 2
 
-        # Linear projections on qkv have been removed in this custom layer.
-        self.q_attn = MultiheadAttention(q_dim, num_heads, dropout=dropout)
-        # Add the missing linear projections.
-        self.q_attn_q_proj = nn.Linear(q_dim, q_dim)
-        self.q_attn_k_proj = nn.Linear(q_dim, q_dim)
-        self.q_attn_v_proj = nn.Linear(q_dim, q_dim)
-        # Each scalar is mapped to a vector of shape kv_dim // 2.
-        # For a box pair, the dimension is 8 * (kv_dim // 2).
-        self.q_attn_qpos_proj = nn.Linear(kv_dim * 4, q_dim)
-        self.q_attn_kpos_proj = nn.Linear(kv_dim * 4, q_dim)
-
-        self.qk_attn = MultiheadAttention(q_dim * 2, num_heads, dropout=dropout, vdim=q_dim)
-        self.qk_attn_q_proj = nn.Linear(q_dim, q_dim)
-        self.qk_attn_k_proj = nn.Linear(q_dim, q_dim)
-        self.qk_attn_v_proj = nn.Linear(q_dim, q_dim)
-        self.qk_attn_kpos_proj = nn.Linear(kv_dim, q_dim)
-        self.qk_attn_qpos_proj = nn.Linear(kv_dim * 2, q_dim)
-
-        self.cross_attn = MultiheadAttention(q_dim, num_heads, dropout=dropout, vdim=q_dim)
-        self.cross_attn_q_proj = nn.Linear(q_dim, q_dim)
-        self.cross_attn_k_proj = nn.Linear(q_dim, q_dim)
-        self.cross_attn_v_proj = nn.Linear(q_dim, q_dim)
-
-        self.feature_mapping = nn.Sequential(nn.Linear(1024,ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, q_dim))
-        self.detr_feature_mapping = nn.Linear(256, q_dim)
-        self.feature_self_attn = MultiheadAttention(q_dim, num_heads, dropout=dropout)
-        self.feature_self_attn_q_proj = nn.Linear(q_dim, q_dim)
-        self.feature_self_attn_k_proj = nn.Linear(q_dim, q_dim)
-        self.feature_self_attn_v_proj = nn.Linear(q_dim, q_dim)
-
-        self.feature_cross_attn = MultiheadAttention(q_dim, num_heads, dropout=dropout)
-        self.feature_cross_attn_q_proj = nn.Linear(kv_dim, q_dim)
-        self.feature_cross_attn_k_proj = nn.Linear(q_dim, q_dim)
-        self.feature_cross_attn_v_proj = nn.Linear(q_dim, q_dim)
-        self.feature_ffn = nn.Sequential(
-            nn.Linear(q_dim, ffn_interm_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(ffn_interm_dim, q_dim)
-        )
-        self.feature_self_dp = nn.Dropout(dropout)
-        self.feature_cross_dp = nn.Dropout(dropout)
-        self.feature_self_ln = nn.LayerNorm(q_dim)
-        self.feature_cross_ln = nn.LayerNorm(q_dim)
-        self.query_adapter_qk = nn.Sequential(
+        # ho_queries, all features, codes projections
+        self.llava_cali_embedding = nn.Embedding(256, self_attn_dim)
+        self.register_embedding = nn.Embedding(8, self_attn_dim)
+        self.query_adapter = nn.Sequential(
             nn.Linear(q_dim, ffn_interm_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(ffn_interm_dim, q_dim),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Linear(q_dim, q_dim)
         )
-        self.query_adapter_ql = nn.Sequential(
-            nn.Linear(q_dim, ffn_interm_dim),
+        self.cls_pos_proj = nn.Linear(kv_dim * 2 + kv_dim * 4, q_dim)
+        self.backbone_proj = nn.Linear(kv_dim, q_dim)
+        self.backbone_pos_proj = nn.Linear(kv_dim, q_dim)
+        self.answer_proj = nn.Linear(self_attn_dim, self_attn_dim)
+        self.clip_token_proj = nn.Sequential(
+            nn.Linear(1024, ffn_interm_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(ffn_interm_dim, q_dim),
-            nn.ReLU()
-        )
+            nn.Linear(ffn_interm_dim, self_attn_dim))
+        
+        self.query_back_proj = nn.Linear(self_attn_dim, q_dim)
+        self.backbone_back_proj = nn.Linear(self_attn_dim, kv_dim)
+        self.clip_token_back_proj = nn.Linear(self_attn_dim, 1024)
 
-        self.ffn = nn.Sequential(
-            nn.Linear(q_dim, ffn_interm_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(ffn_interm_dim, q_dim)
+        
+        # self-attn
+        
+        self.self_attn = MultiheadAttention(self_attn_dim, num_heads, dropout=dropout)
+        self.self_attn_q_proj = nn.Linear(self_attn_dim, self_attn_dim)
+        self.self_attn_k_proj = nn.Linear(self_attn_dim, self_attn_dim)
+        self.self_attn_v_proj = nn.Linear(self_attn_dim, self_attn_dim)
+        self.self_attn_ffn = nn.Sequential(
+            nn.Linear(self_attn_dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, self_attn_dim)
         )
-        self.llava_ffn = nn.Sequential(
-            nn.Linear(q_dim, ffn_interm_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(ffn_interm_dim, q_dim)
-        )
-        self.ln1 = nn.LayerNorm(q_dim)
-        self.ln2 = nn.LayerNorm(q_dim)
-        self.ln3 = nn.LayerNorm(q_dim)
-        self.ln_cross = nn.LayerNorm(q_dim)
-        self.dp1 = nn.Dropout(dropout)
-        self.dp2 = nn.Dropout(dropout)
-        self.dp3 = nn.Dropout(dropout)
-        self.dp_cross = nn.Dropout(dropout)
-        self.llava_cali_embedding = nn.Embedding(117, q_dim)
+        self.self_attn_ln1 = nn.LayerNorm(self_attn_dim)
+        self.self_attn_ln2 = nn.LayerNorm(self_attn_dim)
+        self.self_attn_dp1 = nn.Dropout(dropout)
+        self.self_attn_dp2 = nn.Dropout(dropout)
     def forward(self,
             queries: Tensor, features: Tensor,
             q_pos: Tensor, k_pos: Tensor,
@@ -223,68 +184,53 @@ class TransformerDecoderLayer(nn.Module):
         --------
         queries: Tensor
         """
-        # Perform self attention amongst queries
-        q = self.q_attn_q_proj(queries)
-        k = self.q_attn_k_proj(queries)
-        v = self.q_attn_v_proj(queries)
-        q_p = self.q_attn_qpos_proj(q_pos["box"])
-        k_p = self.q_attn_kpos_proj(q_pos["box"])
-        q = q + q_p
-        k = k + k_p
-        q_attn = self.q_attn(
-            q, k, value=v, attn_mask=q_attn_mask,
-            key_padding_mask=q_padding_mask
-        )[0]
-        queries = self.ln1(queries + self.dp1(q_attn))
-        # Perform self attention of llava vision feature
-        llava_feature = self.feature_mapping(llava_feature)
-        lq = self.feature_self_attn_q_proj(llava_feature)
-        lk = self.feature_self_attn_k_proj(llava_feature)
-        lv = self.feature_self_attn_v_proj(llava_feature)
-        llava_feature_attn = self.feature_self_attn(query=lq, key=lk, value=lv)[0]
-        llava_feature = self.feature_self_ln(llava_feature + self.feature_self_dp(llava_feature_attn))
-        # perform cross attn of llava vision and detr feature
-        lq = self.feature_cross_attn_q_proj(features)
-        lk = self.feature_cross_attn_k_proj(llava_feature)
-        lv = self.feature_cross_attn_v_proj(llava_feature)
-        llava_feature_attn = self.feature_cross_attn(query=lq, key=lk, value=lv)[0]
-        features = self.detr_feature_mapping(features)
-        features = self.feature_cross_ln(features + self.feature_cross_dp(llava_feature_attn))
-        # Perform cross attention from memory features to queries
-        q = self.qk_attn_q_proj(self.query_adapter_qk(queries))
-        k = self.qk_attn_k_proj(features)
-        v = self.qk_attn_v_proj(features)
-        q_p = self.qk_attn_qpos_proj(q_pos["centre"])
-        k_p = self.qk_attn_kpos_proj(k_pos)
-
+        # process cls token
+        q = self.query_adapter((queries))
+        q_p = self.cls_pos_proj(torch.cat((q_pos["centre"], q_pos["box"]), dim=-1))
         n_q, bs, _ = q.shape
         q = q.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
         q_p = q_p.view(n_q, bs, self.num_heads, self.q_dim // self.num_heads)
-        q = torch.cat([q, q_p], dim=3).view(n_q, bs, self.q_dim * 2)
+        cls_token = torch.cat([q, q_p], dim=3).view(n_q, bs, self.q_dim * 2)
+        num_cls_token = len(cls_token)
 
-        hw, _, _ = k.shape
-        k = k.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
-        k_p = k_p.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
-        k = torch.cat([k, k_p], dim=3).view(hw, bs, self.q_dim * 2)
+        # process vision token
+        backbone_token = self.backbone_proj(features)
+        backbone_token_pos = self.backbone_pos_proj(k_pos)
+        hw, _, _ = backbone_token.shape
+        backbone_token = backbone_token.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
+        backbone_token_pos = backbone_token_pos.view(hw, bs, self.num_heads, self.q_dim // self.num_heads)
+        backbone_token = torch.cat([backbone_token, backbone_token_pos], dim=3).view(hw, bs, self.q_dim * 2)
+        clip_token = self.clip_token_proj(llava_feature)
+        vision_token = torch.cat((backbone_token, clip_token), dim=0)
+        num_backbone_token = len(backbone_token)
+        num_clip_token = len(clip_token)
 
-        qk_attn = self.qk_attn(
-            query=q, key=k, value=v, attn_mask=qk_attn_mask,
-            key_padding_mask=kv_padding_mask
-        )[0]
-        queries = self.ln2(queries + self.dp2(qk_attn))
-        llava_answer = self.llava_cali_embedding.weight[llava_answer_idx.unique()].unsqueeze(1)
-        llava_queries = self.cross_attn(
-            query=self.cross_attn_q_proj(self.query_adapter_ql(queries)),
-            key=self.cross_attn_k_proj(llava_answer),
-            value=self.cross_attn_v_proj(llava_answer)
-        )[0]
-        llava_queries = self.ln_cross(queries + self.dp_cross(self.llava_ffn(llava_queries)))
-        queries = self.ln3(llava_queries + self.dp3(self.ffn(queries)))
-        # # 现在是conjugated的连接方式，可以再试一下sequential的连接方式
-        # queries = queries + llava_queries
-        # queries = self.ln3(queries + self.dp3(self.ffn(queries)))
-        # CUDA_VISIBLE_DEVICES=0 DETR=base python main.py --world-size 1 --pretrained /home/pvic/detr-r50-hicodet.pth --output-dir /home/MasterThesis/pvic/log/llava_cross_attn_conjugated_5_answer/
-        return queries
+        # process answer token
+        answer_token = self.llava_cali_embedding.weight[llava_answer_idx.unique()].unsqueeze(1)
+        answer_token = self.answer_proj(answer_token)
+
+        # register token
+        reg_token = self.register_embedding.weight.unsqueeze(1)
+
+        # concatenate all tokens
+        input_tokens = torch.cat((cls_token, vision_token, answer_token, reg_token), dim=0)
+        input_masks = torch.zeros_like(input_tokens[:, :, 0]).to(torch.bool).transpose(0, 1)
+        input_masks[:, num_cls_token:num_backbone_token+num_cls_token] = kv_padding_mask
+        # perform self-attention
+        q = self.self_attn_q_proj(input_tokens)
+        k = self.self_attn_k_proj(input_tokens)
+        v = self.self_attn_v_proj(input_tokens)
+        attn, attn_weights = self.self_attn(
+            query=q, key=k, value=v,
+            key_padding_mask=input_masks
+        )
+        x = self.self_attn_ln1(input_tokens + self.self_attn_dp1(attn))
+        x = self.self_attn_ln2(x + self.self_attn_dp2(self.self_attn_ffn(x)))
+        cls_token = self.query_back_proj(x[:num_cls_token])
+        vision_token = self.backbone_back_proj(x[num_cls_token:num_backbone_token+num_cls_token])
+        clip_token = self.clip_token_back_proj(x[num_backbone_token+num_cls_token:num_backbone_token+num_cls_token+num_clip_token])
+
+        return cls_token, vision_token, clip_token
 
 class TransformerDecoder(nn.Module):
 
@@ -323,7 +269,7 @@ class TransformerDecoder(nn.Module):
         output = queries
         intermediate = []
         for layer in self.layers:
-            output = layer(
+            output, features, llava_feature = layer(
                 output, features,
                 q_attn_mask=q_attn_mask,
                 qk_attn_mask=qk_attn_mask,
