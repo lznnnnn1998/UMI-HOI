@@ -186,7 +186,7 @@ class TransformerDecoderLayer(nn.Module):
         self.dp2 = nn.Dropout(dropout)
         self.dp3 = nn.Dropout(dropout)
         self.dp_cross = nn.Dropout(dropout)
-        self.llava_cali_embedding = nn.Embedding(117, q_dim)
+        self.llava_cali_embedding = nn.Embedding(256, q_dim)
     def forward(self,
             queries: Tensor, features: Tensor,
             q_pos: Tensor, k_pos: Tensor,
