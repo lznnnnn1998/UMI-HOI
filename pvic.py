@@ -245,6 +245,11 @@ class PViC(nn.Module):
         self.max_instances = max_instances
         self.raw_lambda = raw_lambda
 
+        # hyper parameters of dino training:
+        self.train_self_supervised = False
+        self.view_num = 1
+        self.view_range = 1
+        self.temperature = 0.04
     def freeze_detector(self):
         for p in self.detector.parameters():
             p.requires_grad = False
@@ -487,20 +492,42 @@ class PViC(nn.Module):
         ) = self.ho_matcher(region_props, image_sizes)
         
         # Enhance visual context with triplet decoder.
-        query_embeds = []
-        for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
-            query_embeds.append(self.decoder(
-                ho_q.unsqueeze(1),              # (n, 1, q_dim)
-                mem.unsqueeze(1),               # (hw, 1, kv_dim)
-                kv_padding_mask=kv_p_m[i],      # (1, hw)
-                q_pos=positional_embeds[i],     # centre: (n, 1, 2*kv_dim), box: (n, 1, 4*kv_dim)
-                k_pos=k_pos[i],                 # (hw, 1, kv_dim)
-                llava_answer_idx=llava_answer[i],
-                llava_feature=llava_feature[i].transpose(0, 1)
-            ).squeeze(dim=2))
-        # Concatenate queries from all images in the same batch.
-        query_embeds = torch.cat(query_embeds, dim=1)   # (ndec, \sigma{n}, q_dim)
-        logits = self.binary_classifier(query_embeds)
+        if self.train_self_supervised:
+            view_num = 2
+            local_view_num = 8
+            large_view_range = 0.7
+            local_view_range = 0.3
+            query_embeds = []
+            for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
+                mem_weights = torch.ones(len(mem), device=mem.device)
+                
+                query_embeds.append(self.decoder(
+                    ho_q.unsqueeze(1),              # (n, 1, q_dim)
+                    mem.unsqueeze(1),               # (hw, 1, kv_dim)
+                    kv_padding_mask=kv_p_m[i],      # (1, hw)
+                    q_pos=positional_embeds[i],     # centre: (n, 1, 2*kv_dim), box: (n, 1, 4*kv_dim)
+                    k_pos=k_pos[i],                 # (hw, 1, kv_dim)
+                    llava_answer_idx=llava_answer[i],
+                    llava_feature=llava_feature[i].transpose(0, 1)
+                ).squeeze(dim=2))
+            # Concatenate queries from all images in the same batch.
+            query_embeds = torch.cat(query_embeds, dim=1)   # (ndec, \sigma{n}, q_dim)
+            logits = self.binary_classifier(query_embeds)
+        else:
+            query_embeds = []
+            for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
+                query_embeds.append(self.decoder(
+                    ho_q.unsqueeze(1),              # (n, 1, q_dim)
+                    mem.unsqueeze(1),               # (hw, 1, kv_dim)
+                    kv_padding_mask=kv_p_m[i],      # (1, hw)
+                    q_pos=positional_embeds[i],     # centre: (n, 1, 2*kv_dim), box: (n, 1, 4*kv_dim)
+                    k_pos=k_pos[i],                 # (hw, 1, kv_dim)
+                    llava_answer_idx=llava_answer[i],
+                    llava_feature=llava_feature[i].transpose(0, 1)
+                ).squeeze(dim=2))
+            # Concatenate queries from all images in the same batch.
+            query_embeds = torch.cat(query_embeds, dim=1)   # (ndec, \sigma{n}, q_dim)
+            logits = self.binary_classifier(query_embeds)
 
         if self.training:
             labels = associate_with_ground_truth(

@@ -76,7 +76,7 @@ def main(rank, args):
         args.num_verbs = 24
     
     model = build_detector(args, object_to_target)
-
+    model_t = model.copy()
     if os.path.exists(args.resume):
         print(f"=> Rank {rank}: PViC loaded from saved checkpoint {args.resume}.")
         checkpoint = torch.load(args.resume, map_location='cpu')
@@ -84,7 +84,7 @@ def main(rank, args):
     else:
         print(f"=> Rank {rank}: PViC randomly initialised.")
 
-    engine = CustomisedDLE(model, train_loader, test_loader, args)
+    engine = CustomisedDLE(model, train_loader, test_loader, args, model_t)
 
     if args.cache:
         if args.dataset == 'hicodet':

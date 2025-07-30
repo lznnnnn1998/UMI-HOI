@@ -141,13 +141,14 @@ class CacheTemplate(defaultdict):
             return [0., 0., .1, .1, 0.]
 
 class CustomisedDLE(DistributedLearningEngine):
-    def __init__(self, net, train_dataloader, test_dataloader, config):
+    def __init__(self, net, train_dataloader, test_dataloader, config, net_t):
         super().__init__(
             net, None, train_dataloader,
             print_interval=config.print_interval,
             cache_dir=config.output_dir,
             find_unused_parameters=True
         )
+        self.net_t = net_t
         self.config = config
         self.max_norm = config.clip_max_norm
         self.test_dataloader = test_dataloader
