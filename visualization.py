@@ -223,6 +223,13 @@ def main(args):
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
         print(f"=> Start from a randomly initialised model")
+    matrix = model.binary_classifier.weight @ model.binary_classifier.weight.T
+    matrix = matrix - matrix.min()
+    matrix = matrix / matrix.max()
+    plt.imshow(matrix)
+    plt.colorbar()
+    plt.title("Orthogonality of Final Classification Layer")
+    plt.savefig("./linear matrix.png", dpi=1000)
     for _ in range(args.example_num):
         args.index += 1
         attn_weights = {
