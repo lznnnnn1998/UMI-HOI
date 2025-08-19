@@ -138,7 +138,11 @@ class TransformerDecoderLayer(nn.Module):
         self.self_attn_q_proj = nn.Linear(q_dim, q_dim)
         self.self_attn_k_proj = nn.Linear(q_dim, q_dim)
         self.self_attn_v_proj = nn.Linear(q_dim, q_dim)
-        self.self_attn_ffn = nn.Sequential(
+        self.self_attn_ffn_cls = nn.Sequential(
+            nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, q_dim)
+        )
+        self.self_attn_ffn_tokens = nn.Sequential(
             nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
             nn.Linear(ffn_interm_dim, q_dim)
         )
@@ -226,7 +230,9 @@ class TransformerDecoderLayer(nn.Module):
             key_padding_mask=input_masks
         )
         x = self.self_attn_ln1(input_tokens + self.self_attn_dp1(attn))
-        x = self.self_attn_ln2(x + self.self_attn_dp2(self.self_attn_ffn(x)))
+        x_cls = self.self_attn_ffn_cls(x[:num_cls_token])
+        x_token = self.self_attn_ffn_tokens(x[num_cls_token:])
+        x = self.self_attn_ln2(x + self.self_attn_dp2(torch.cat((x_cls, x_token), dim=0)))
 
         return x[:num_cls_token]
 
