@@ -154,7 +154,11 @@ class TransformerDecoderLayer(nn.Module):
             q_padding_mask: Optional[Tensor] = None,
             kv_padding_mask: Optional[Tensor] = None,
             llava_answer_idx:Optional[Tensor] = None,
-            llava_feature: Optional[Tensor] = None
+            llava_feature: Optional[Tensor] = None,
+            cnn_patch_mask: Optional[Tensor] = None,
+            clip_patch_mask: Optional[Tensor] = None,
+            global_view_mask: Optional[Tensor] = None,
+            local_view_mask: Optional[Tensor]  = None
         ):
         """
         Parameters:
@@ -254,7 +258,9 @@ class TransformerDecoder(nn.Module):
             q_pos: Optional[Tensor] = None,
             k_pos: Optional[Tensor] = None,
             llava_answer_idx:Optional[Tensor] = None,
-            llava_feature:Optional[Tensor] = None
+            llava_feature:Optional[Tensor] = None,
+            cnn_patch_mask: Optional[Tensor] = None,
+            clip_patch_mask: Optional[Tensor] = None
         ):
         # Add support for zero layers
         if self.num_layers == 0:
@@ -277,7 +283,8 @@ class TransformerDecoder(nn.Module):
                 qk_attn_mask=qk_attn_mask,
                 q_padding_mask=q_padding_mask,
                 kv_padding_mask=kv_padding_mask,
-                q_pos=q_pos, k_pos=k_pos,llava_answer_idx=llava_answer_idx, llava_feature=llava_feature
+                q_pos=q_pos, k_pos=k_pos,llava_answer_idx=llava_answer_idx, llava_feature=llava_feature,
+                cnn_patch_mask=cnn_patch_mask, clip_patch_mask=clip_patch_mask
             )
             if self.return_intermediate:
                 intermediate.append(self.norm(output))

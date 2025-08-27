@@ -497,10 +497,48 @@ class PViC(nn.Module):
             local_view_num = 8
             large_view_range = 0.7
             local_view_range = 0.3
+            global_view_scale = 0.8
+            local_view_scale = 0.8
             query_embeds = []
             for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
+                # prepare for image level
+                # global view
+                mem_weights = torch.ones(llava_feature[i].shape[1], device=mem.device)
+                global1_selected_pos = torch.multinomial(mem_weights, llava_feature[i].shape[1] * global_view_scale, replacement=False)
+                global2_selected_pos = torch.multinomial(mem_weights, llava_feature[i].shape[1] * global_view_scale, replacement=False)
+                global1_selected_mask = torch.ones_like(llava_feature[i].shape[:2])
+                global2_selected_mask = torch.ones_like(llava_feature[i].shape[:2])
+                global1_selected_mask[global1_selected_pos] = 0
+                global2_selected_mask[global2_selected_pos] = 0
+
+                # local view
                 mem_weights = torch.ones(len(mem), device=mem.device)
-                
+                local1_selected_pos = torch.multinomial(mem_weights, int(len(mem) * local_view_scale), replacement=False)
+                local2_selected_pos = torch.multinomial(mem_weights, int(len(mem) * local_view_scale), replacement=False)
+                local1_selected_mask = torch.ones_like(len(mem))
+                local2_selected_mask = torch.ones_like(len(mem))
+                local1_selected_mask[local1_selected_pos] = 0
+                local2_selected_mask[local2_selected_pos] = 0
+
+                # prepare for patch level
+                # clip patch
+                mem_weights = torch.ones(llava_feature[i].shape[1], device=mem.device)
+                u_selected_pos = torch.multinomial(mem_weights, int(llava_feature[i].shape[1] * global_view_scale), replacement=False)
+                v_selected_pos = torch.multinomial(mem_weights, int(llava_feature[i].shape[1] * global_view_scale), replacement=False)
+                clip1_selected_mask = torch.ones_like(llava_feature[i].shape[:2])
+                clip2_selected_mask = torch.ones_like(llava_feature[i].shape[:2])
+                clip1_selected_mask[u_selected_pos] = 0
+                clip2_selected_mask[v_selected_pos] = 0
+
+                # cnn patch
+                mem_weights = torch.ones(len(mem), device=mem.device)
+                u_selected_pos = torch.multinomial(mem_weights, int(len(mem) * global_view_scale), replacement=False)
+                v_selected_pos = torch.multinomial(mem_weights, int(len(mem) * global_view_scale), replacement=False)
+                cnn1_selected_mask = torch.ones_like(len(mem))
+                cnn2_selected_mask = torch.ones_like(len(mem))
+                cnn1_selected_mask[u_selected_pos] = 0
+                cnn2_selected_mask[v_selected_pos] = 0
+
                 query_embeds.append(self.decoder(
                     ho_q.unsqueeze(1),              # (n, 1, q_dim)
                     mem.unsqueeze(1),               # (hw, 1, kv_dim)
