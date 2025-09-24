@@ -75,8 +75,10 @@ def main(rank, args):
         object_to_target = list(train_loader.dataset.dataset.object_to_action.values())
         args.num_verbs = 24
     
-    model = build_detector(args, object_to_target)
-    model_t = model.copy()
+    model,detr_meta = build_detector(args, object_to_target, 's')
+    model_t, _ = build_detector(args, object_to_target, 't')
+
+    model_t.load_state_dict(model.state_dict())
     if os.path.exists(args.resume):
         print(f"=> Rank {rank}: PViC loaded from saved checkpoint {args.resume}.")
         checkpoint = torch.load(args.resume, map_location='cpu')
@@ -84,7 +86,7 @@ def main(rank, args):
     else:
         print(f"=> Rank {rank}: PViC randomly initialised.")
 
-    engine = CustomisedDLE(model, train_loader, test_loader, args, model_t)
+    engine = CustomisedDLE(model, model_t, detr_meta, train_loader, test_loader, args)
 
     if args.cache:
         if args.dataset == 'hicodet':
@@ -117,7 +119,7 @@ def main(rank, args):
                 )
             return
 
-    model.freeze_detector()
+    engine.freeze_detector()
     param_dicts = [{"params": [p for p in model.parameters() if p.requires_grad]}]
     optim = torch.optim.AdamW(param_dicts, lr=args.lr_head, weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_drop, gamma=args.lr_drop_factor)

@@ -22,7 +22,7 @@ except ImportError:
 from tqdm import tqdm
 from collections import defaultdict
 from torch.utils.data import Dataset
-
+import torch.nn.functional as F
 from vcoco.vcoco import VCOCO
 from hicodet.hicodet import HICODet
 
@@ -32,7 +32,8 @@ from pocket.utils import DetectionAPMeter, BoxPairAssociation
 
 from ops import recover_boxes
 from detr.datasets import transforms as T
-
+from detr.util.misc import NestedTensor, nested_tensor_from_tensor_list
+from detr.models.position_encoding import PositionEmbeddingSine
 def custom_collate(batch):
     images = []
     targets = []
@@ -44,6 +45,20 @@ def custom_collate(batch):
         llava_answers.append(llava_answer)
         llava_features.append(llava_feature)
     return images, targets, llava_answers, llava_features
+
+def base_forward(ctx, samples: NestedTensor):
+        if isinstance(samples, (list, torch.Tensor)):
+            samples = nested_tensor_from_tensor_list(samples)
+        features, pos = ctx.backbone(samples)
+
+        src, mask = features[-1].decompose()
+        assert mask is not None
+        hs = ctx.transformer(ctx.input_proj(src), mask, ctx.query_embed.weight, pos[-1])[0]
+
+        outputs_class = ctx.class_embed(hs)
+        outputs_coord = ctx.bbox_embed(hs).sigmoid()
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
+        return out, hs, features
 
 class DataFactory(Dataset):
     def __init__(self, name, partition, data_root, llava_token_path, llava_answer_path):
@@ -141,18 +156,87 @@ class CacheTemplate(defaultdict):
             return [0., 0., .1, .1, 0.]
 
 class CustomisedDLE(DistributedLearningEngine):
-    def __init__(self, net, train_dataloader, test_dataloader, config, net_t):
+    def __init__(self, net, net_t, detr_meta, train_dataloader, test_dataloader, config):
         super().__init__(
             net, None, train_dataloader,
             print_interval=config.print_interval,
             cache_dir=config.output_dir,
             find_unused_parameters=True
         )
-        self.net_t = net_t
         self.config = config
         self.max_norm = config.clip_max_norm
         self.test_dataloader = test_dataloader
         self.steped = False
+        self.net_t = net_t.cuda()
+        self.detr = detr_meta["detr"].cuda()
+        self.postprocessor = detr_meta["postprocessor"]["bbox"]
+        self.kv_pe = PositionEmbeddingSine(128, 20, normalize=True)
+
+        # ibot parameters
+        self.teacher_temp = 0.04
+        self.student_temp = 0.04
+        self.teacher_patch_center = torch.nn.Parameter(torch.zeros(1, 1, 1024), requires_grad=False).cuda() # this should be kv_dim * 4
+        self.teacher_cls_center = torch.nn.Parameter(torch.zeros(1, 117), requires_grad=False).cuda()
+        self.lambda_cls = 1
+        self.lambda_patch = 1
+        self.center_momentum_cls = 0.9
+        self.center_momentum_patch = 0.9
+        # EMA
+        self.momentum_schedule = self.cosine_scheduler(0.996, 1, 9, len(train_dataloader))
+    def freeze_detector(self):
+        for p in self.detr.parameters():
+            p.requires_grad = False
+    def cosine_scheduler(self, base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0):
+        warmup_schedule = np.array([])
+        warmup_iters = warmup_epochs * niter_per_ep
+        if warmup_epochs > 0:
+            warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+
+        iters = np.arange(epochs * niter_per_ep - warmup_iters)
+        schedule = final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * iters / len(iters)))
+
+        schedule = np.concatenate((warmup_schedule, schedule))
+        assert len(schedule) == epochs * niter_per_ep
+        return schedule
+    def ibot_loss(self, mem_s:list[torch.Tensor], mem_t:torch.Tensor, 
+                  logits_s: list[torch.Tensor], logits_t: torch.Tensor):
+        # logit_s in shape [n_pair, dim]
+        logits_s[0] = logits_s[0] / self.student_temp
+        logits_s[1] = logits_s[1] / self.student_temp
+        mem_s[0] = mem_s[0] / self.student_temp
+        mem_s[1] = mem_s[1] / self.student_temp
+
+        logits_t = F.softmax((logits_t - self.teacher_cls_center) / self.teacher_temp, dim=-1)
+        mem_t = F.softmax((mem_t - self.teacher_patch_center) / self.teacher_temp, dim=-1)
+        loss_cls = 0
+        # loss_cls = loss_cls + torch.sum(
+        #     -logits_t * F.log_softmax(logits_s[0], dim=-1), dim=-1
+        # ).mean()
+        # loss_cls = loss_cls + torch.sum(
+        #     -logits_t * F.log_softmax(logits_s[1], dim=-1), dim=-1
+        # ).mean()
+        loss_patch = 0
+        loss_patch = loss_patch + torch.sum(
+            -mem_t * F.log_softmax(mem_s[0], dim=-1), dim=-1
+        ).mean()
+        loss_patch = loss_patch + torch.sum(
+            -mem_t * F.log_softmax(mem_s[1], dim=-1), dim=-1
+        ).mean()
+
+        loss_cls = loss_cls * self.lambda_cls
+        loss_patch = loss_patch * self.lambda_patch
+        ibot_loss_dict = dict(
+            loss_cls=loss_cls, loss_patch=loss_patch,
+            total_ibot_loss=loss_cls+loss_patch)
+        self.update_center(logits_t, mem_t)
+        return ibot_loss_dict
+    @torch.no_grad()
+    def update_center(self, logits_t:torch.Tensor, mem_t:torch.Tensor):
+        cls_center = torch.mean(logits_t, dim=0, keepdim=True)
+        self.teacher_cls_center = self.teacher_cls_center * self.center_momentum_cls + cls_center * (1 - self.center_momentum_cls)
+
+        patch_center = torch.mean(mem_t.mean(1), dim=0, keepdim=True)
+        self.teacher_patch_center = self.teacher_patch_center * self.center_momentum_patch + patch_center * (1 - self.center_momentum_patch)
     def _on_start(self):
         if self._train_loader.dataset.name == "hicodet":
             # ap = self.test_hico()
@@ -202,18 +286,51 @@ class CustomisedDLE(DistributedLearningEngine):
             wandb.finish()
 
     def _on_each_iteration(self):
-        loss_dict, n_p = self._state.net(
-            images=self._state.inputs[0], targets=self._state.inputs[1], llava_answer=self._state.inputs[2], llava_feature=self._state.targets)
-        if n_p != 0:
-            if loss_dict['cls_loss'].isnan():
-                raise ValueError(f"The HOI loss is NaN for rank {self._rank}")
+        results, hs, features = base_forward(self.detr, self._state.inputs[0])
+        memory, mask = features[-1].decompose()
+        b, c, h, w = memory.shape
+        memory = memory.permute(0, 2, 3, 1).reshape(b, h * w, c)
+        image_sizes = torch.as_tensor([im.size()[-2:] for im in self._state.inputs[0]], device=self._state.inputs[0][0].device)
+        results = self.postprocessor(results, image_sizes)
+        k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, 256)
 
+        loss_dict, n_p, memory, logits1, logits2 = self._state.net(
+            images=self._state.inputs[0],
+            results=results,
+            detr_final_hs=hs[-1],
+            backbone_features=features,
+            k_pos=k_pos,
+            targets=self._state.inputs[1], llava_answer=self._state.inputs[2], llava_feature=self._state.targets)
+        with torch.no_grad():
+
+            query_embeds_t, logits_t, memory_t = self.net_t(
+            images=self._state.inputs[0],
+            results=results,
+            detr_final_hs=hs[-1],
+            backbone_features=features,
+            k_pos=k_pos,
+            targets=self._state.inputs[1], llava_answer=self._state.inputs[2], llava_feature=self._state.targets)
+        if n_p != 0:
+            if loss_dict['cls_loss1'].isnan() or loss_dict['cls_loss2'].isnan():
+                raise ValueError(f"The HOI loss is NaN for rank {self._rank}")
+            ibot_loss_dict = self.ibot_loss(mem_s=memory, mem_t=memory_t, logits_s=[logits1,logits2], logits_t=logits_t)
+            loss_dict['ibot_loss'] = ibot_loss_dict['total_ibot_loss']
             self._state.loss = sum(loss for loss in loss_dict.values())
             self._state.optimizer.zero_grad(set_to_none=True)
             self._state.loss.backward()
             if self.max_norm > 0:
                 torch.nn.utils.clip_grad_norm_(self._state.net.parameters(), self.max_norm)
             self._state.optimizer.step()
+
+            # EMA
+            with torch.no_grad():
+                stud_dict = {}
+                teacher_dict = {}
+                for _name, _param in self._state.net.module.named_parameters():
+                    stud_dict[_name] = _param
+                m = self.momentum_schedule[self._state.epoch]
+                for _name, _param in self.net_t.named_parameters():
+                    _param.data.mul_(m).add_((1 - m) * stud_dict[_name].detach().data)
         else:
             pass
     def _print_statistics(self):
@@ -294,11 +411,11 @@ class CustomisedDLE(DistributedLearningEngine):
             if perf[0] > self.best_perf:
                 self.best_perf = perf[0]
                 torch.save(checkpoint, os.path.join(self._cache_dir, "best.pth"))
-        # if self._state.lr_scheduler is not None:
-        #     self._state.lr_scheduler.step()
-        if perf[0] > 0.388 and self.steped==False:
+        if self._state.lr_scheduler is not None:
             self._state.lr_scheduler.step()
-            self.steped = True
+        # if perf[0] > 0.387 and self.steped==False:
+        #     self._state.lr_scheduler.step()
+        #     self.steped = True
 
     @torch.no_grad()
     def test_hico(self):
@@ -318,7 +435,20 @@ class CustomisedDLE(DistributedLearningEngine):
             )
         for batch in tqdm(dataloader, disable=(self._world_size != 1)):
             inputs = pocket.ops.relocate_to_cuda(batch)
-            outputs = net(*inputs)
+            results, hs, features = base_forward(self.detr, inputs[0])
+            memory, mask = features[-1].decompose()
+            b, c, h, w = memory.shape
+            memory = memory.permute(0, 2, 3, 1).reshape(b, h * w, c)
+            image_sizes = torch.as_tensor([im.size()[-2:] for im in inputs[0]], device=inputs[0][0].device)
+            results = self.postprocessor(results, image_sizes)
+            k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, 256)
+            
+            outputs = net(images=inputs[0],
+                results=results,
+                detr_final_hs=hs[-1],
+                backbone_features=features,
+                k_pos=k_pos,
+                targets=inputs[1], llava_answer=inputs[2], llava_feature=inputs[3])
             outputs = pocket.ops.relocate_to_cpu(outputs, ignore=True)
             targets = batch[1]
             targets = pocket.ops.relocate_to_cpu(targets, ignore=True)
