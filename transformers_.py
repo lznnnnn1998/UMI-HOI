@@ -83,6 +83,34 @@ class TransformerEncoder(nn.Module):
             attn_weights.append(attn)
         return x, attn_weights
 
+class SelfAttnBlock(nn.Module):
+    def __init__(self, hidden_size, num_heads, dropout):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.self_attn = MultiheadAttention(hidden_size, num_heads, dropout=dropout)
+        self.self_attn_q_proj = nn.Linear(hidden_size, hidden_size)
+        self.self_attn_k_proj = nn.Linear(hidden_size, hidden_size)
+        self.self_attn_v_proj = nn.Linear(hidden_size, hidden_size)
+        self.self_attn_ffn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(hidden_size * 4, hidden_size)
+        )
+        self.self_attn_ln1 = nn.LayerNorm(hidden_size)
+        self.self_attn_ln2 = nn.LayerNorm(hidden_size)
+        self.self_attn_dp1 = nn.Dropout(dropout)
+        self.self_attn_dp2 = nn.Dropout(dropout)
+    def forward(self, input_tokens):
+        # perform self-attention
+        q = self.self_attn_q_proj(input_tokens)
+        k = self.self_attn_k_proj(input_tokens)
+        v = self.self_attn_v_proj(input_tokens)
+        attn, attn_weights = self.self_attn(
+            query=q, key=k, value=v
+        )
+        x = self.self_attn_ln1(input_tokens + self.self_attn_dp1(attn))
+        # x = self.self_attn_ln2(x + self.self_attn_dp2(self.self_attn_ffn(x)))
+        return x
 class TransformerDecoderLayer(nn.Module):
 
     def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1):
@@ -138,11 +166,7 @@ class TransformerDecoderLayer(nn.Module):
         self.self_attn_q_proj = nn.Linear(q_dim, q_dim)
         self.self_attn_k_proj = nn.Linear(q_dim, q_dim)
         self.self_attn_v_proj = nn.Linear(q_dim, q_dim)
-        self.self_attn_ffn_cls = nn.Sequential(
-            nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(ffn_interm_dim, q_dim)
-        )
-        self.self_attn_ffn_tokens = nn.Sequential(
+        self.self_attn_ffn = nn.Sequential(
             nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
             nn.Linear(ffn_interm_dim, q_dim)
         )
@@ -230,9 +254,7 @@ class TransformerDecoderLayer(nn.Module):
             key_padding_mask=input_masks
         )
         x = self.self_attn_ln1(input_tokens + self.self_attn_dp1(attn))
-        x_cls = self.self_attn_ffn_cls(x[:num_cls_token])
-        x_token = self.self_attn_ffn_tokens(x[num_cls_token:])
-        x = self.self_attn_ln2(x + self.self_attn_dp2(torch.cat((x_cls, x_token), dim=0)))
+        x = self.self_attn_ln2(x + self.self_attn_dp2(self.self_attn_ffn(x)))
 
         return x[:num_cls_token]
 
