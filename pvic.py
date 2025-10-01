@@ -22,6 +22,7 @@ from transformers_ import (
     TransformerDecoder,
     TransformerDecoderLayer,
     SwinTransformer,
+    TransformerDecoder2
 )
 
 from ops import (
@@ -78,8 +79,8 @@ class HumanObjectMatcher(nn.Module):
             nn.Linear(256, repr_size), nn.ReLU(),
         )
         self.encoder = TransformerEncoder(num_layers=2, dropout=dropout)
-        self.mmf = MultiModalFusion(512, repr_size, repr_size)
-
+        self.h_mmf = MultiModalFusion(256, repr_size, repr_size//4 * 1)
+        self.o_mmf = MultiModalFusion(256, repr_size, repr_size//4 * 3)
     def check_human_instances(self, labels):
         is_human = labels == self.human_idx
         n_h = torch.sum(is_human)
@@ -145,10 +146,9 @@ class HumanObjectMatcher(nn.Module):
             embeds, _ = self.encoder(embeds.unsqueeze(1), box_pe.unsqueeze(1))
             embeds = embeds.squeeze(1)
             # Compute human-object queries
-            ho_q = self.mmf(
-                torch.cat([embeds[x_keep], embeds[y_keep]], dim=1),
-                pairwise_spatial_reshaped[x_keep, y_keep]
-            )
+            h_q = self.h_mmf(embeds[x_keep], pairwise_spatial_reshaped[x_keep, y_keep])
+            o_q = self.o_mmf(embeds[y_keep], pairwise_spatial_reshaped[x_keep, y_keep])
+            ho_q = torch.cat((h_q, o_q), dim=-1)
             # Append matched human-object pairs
             ho_queries.append(ho_q)
             paired_indices.append(torch.stack([x_keep, y_keep], dim=1))
@@ -178,23 +178,28 @@ class FeatureHead(nn.Module):
         self.dim_backbone = dim_backbone
         self.return_layer = return_layer
 
-        in_channel_list = [
-            int(dim_backbone * 2 ** i)
-            for i in range(return_layer + 1, 1)
-        ]
-        self.fpn = FeaturePyramidNetwork(in_channel_list, dim)
-        self.layers = nn.Sequential(
+        self.h_mapping = nn.Sequential(
             Permute([0, 2, 3, 1]),
-            SwinTransformer(dim, num_layers)
+            nn.Linear(dim_backbone, dim_backbone//2), nn.ReLU(),
+            nn.Linear(dim_backbone//2, dim//4 * 1)
         )
-    def forward(self, x):
-        pyramid = OrderedDict(
-            (f"{i}", x[i].tensors)
-            for i in range(self.return_layer, 0)
+        self.o_mapping = nn.Sequential(
+            Permute([0, 2, 3, 1]),
+            nn.Linear(dim_backbone, dim_backbone//2), nn.ReLU(),
+            nn.Linear(dim_backbone//2, dim//4 * 3)
         )
+        self.h_layers = SwinTransformer(dim//4 * 1, num_layers, 4)
+
+        self.o_layers = SwinTransformer(dim//4 * 3, num_layers, 12)
+
+    def forward(self, x:List[NestedTensor]):
+
         mask = x[self.return_layer].mask
-        x = self.fpn(pyramid)[f"{self.return_layer}"]
-        x = self.layers(x)
+        x_h = self.h_mapping(x[self.return_layer].tensors)
+        x_o = self.o_mapping(x[self.return_layer].tensors)
+        x_h = self.h_layers(x_h)
+        x_o = self.o_layers(x_o)
+        x = torch.cat((x_h, x_o), dim=-1)
         return x, mask
 
 def inverse_sigmoid(x, eps=1e-5):
@@ -231,7 +236,7 @@ class PViC(nn.Module):
 
         self.ho_matcher = ho_matcher
         self.feature_head = feature_head
-        self.kv_pe = PositionEmbeddingSine(128, 20, normalize=True)
+        self.kv_pe = PositionEmbeddingSine(repr_size//2, 20, normalize=True)
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
@@ -496,7 +501,7 @@ class PViC(nn.Module):
                 q_pos=positional_embeds[i],     # centre: (n, 1, 2*kv_dim), box: (n, 1, 4*kv_dim)
                 k_pos=k_pos[i],                 # (hw, 1, kv_dim)
                 llava_answer_idx=llava_answer[i],
-                llava_feature=llava_feature[i].transpose(0, 1)
+                llava_feature=llava_feature[i]#.transpose(0, 1)
             ).squeeze(dim=2))
         # Concatenate queries from all images in the same batch.
         query_embeds = torch.cat(query_embeds, dim=1)   # (ndec, \sigma{n}, q_dim)
@@ -550,7 +555,7 @@ def build_detector(args, obj_to_verb):
     else:
         num_channels = detr.backbone.num_channels
     feature_head = FeatureHead(
-        args.hidden_dim, num_channels,
+        args.repr_dim, num_channels,
         return_layer, args.triplet_enc_layers
     )
     model = PViC(

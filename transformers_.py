@@ -84,36 +84,157 @@ class TransformerEncoder(nn.Module):
         return x, attn_weights
 
 class SelfAttnBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, dropout):
+    def __init__(self, q_dim, ffn_interm_dim, num_heads, dropout):
         super().__init__()
-        self.hidden_size = hidden_size
+        self.ffn_interm_dim = ffn_interm_dim
+        self.q_dim = q_dim
         self.num_heads = num_heads
-        self.self_attn = MultiheadAttention(hidden_size, num_heads, dropout=dropout)
-        self.self_attn_q_proj = nn.Linear(hidden_size, hidden_size)
-        self.self_attn_k_proj = nn.Linear(hidden_size, hidden_size)
-        self.self_attn_v_proj = nn.Linear(hidden_size, hidden_size)
+        self.head_dim = q_dim // num_heads
+        self.self_attn = MultiheadAttention(q_dim, self.num_heads, dropout=dropout)
+        self.self_attn_q_proj = nn.ModuleList([nn.Linear(q_dim // num_heads, q_dim // num_heads) for _ in range(num_heads)])
+        self.self_attn_k_proj = nn.ModuleList([nn.Linear(q_dim // num_heads, q_dim // num_heads) for _ in range(num_heads)])
+        self.self_attn_v_proj = nn.ModuleList([nn.Linear(q_dim // num_heads, q_dim // num_heads) for _ in range(num_heads)])
         self.self_attn_ffn = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size * 4), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(hidden_size * 4, hidden_size)
+            nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, q_dim)
         )
-        self.self_attn_ln1 = nn.LayerNorm(hidden_size)
-        self.self_attn_ln2 = nn.LayerNorm(hidden_size)
+        # self.self_attn_ffn = TopkMoE(q_dim, ffn_interm_dim, 4, 2, 0.1)
+        self.self_attn_ln1 = nn.GroupNorm(num_heads, q_dim)
+        self.self_attn_ln2 = nn.GroupNorm(num_heads, q_dim)
         self.self_attn_dp1 = nn.Dropout(dropout)
         self.self_attn_dp2 = nn.Dropout(dropout)
-    def forward(self, input_tokens):
+    def forward(self, input_tokens, input_masks):
         # perform self-attention
-        q = self.self_attn_q_proj(input_tokens)
-        k = self.self_attn_k_proj(input_tokens)
-        v = self.self_attn_v_proj(input_tokens)
+        q = torch.cat([self.self_attn_q_proj[i](input_tokens[..., i * self.head_dim: (i+1) * self.head_dim]) for i in range(self.num_heads)], dim=-1)
+        k = torch.cat([self.self_attn_k_proj[i](input_tokens[..., i * self.head_dim: (i+1) * self.head_dim]) for i in range(self.num_heads)], dim=-1)
+        v = torch.cat([self.self_attn_v_proj[i](input_tokens[..., i * self.head_dim: (i+1) * self.head_dim]) for i in range(self.num_heads)], dim=-1)
+        
         attn, attn_weights = self.self_attn(
-            query=q, key=k, value=v
+            query=q, key=k, value=v,
+            key_padding_mask=input_masks
         )
-        x = self.self_attn_ln1(input_tokens + self.self_attn_dp1(attn))
-        # x = self.self_attn_ln2(x + self.self_attn_dp2(self.self_attn_ffn(x)))
+        x = self.self_attn_ln1((input_tokens + self.self_attn_dp1(attn)).permute(0,2,1)).permute(0,2,1)
+        x = self.self_attn_ln2((x + self.self_attn_dp2(self.self_attn_ffn(x))).permute(0,2,1)).permute(0,2,1)
         return x
+class CrossAttnBlock(nn.Module):
+    def __init__(self, q_dim, ffn_interm_dim, num_heads, dropout):
+        super().__init__()
+        self.ffn_interm_dim = ffn_interm_dim
+        self.q_dim = q_dim
+        self.num_heads = num_heads
+        self.head_dim = q_dim // num_heads
+        self.self_attn = MultiheadAttention(q_dim, self.num_heads, dropout=dropout)
+        self.self_attn_q_proj = nn.ModuleList([nn.Linear(q_dim // num_heads, q_dim // num_heads) for _ in range(num_heads)])
+        self.self_attn_k_proj = nn.ModuleList([nn.Linear(q_dim // num_heads, q_dim // num_heads) for _ in range(num_heads)])
+        self.self_attn_v_proj = nn.ModuleList([nn.Linear(q_dim // num_heads, q_dim // num_heads) for _ in range(num_heads)])
+        self.self_attn_ffn = nn.Sequential(
+            nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, q_dim)
+        )
+        # self.self_attn_ffn = TopkMoE(q_dim, ffn_interm_dim, 4, 2, 0.1)
+        self.self_attn_ln1 = nn.GroupNorm(num_heads, q_dim)
+        self.self_attn_ln2 = nn.GroupNorm(num_heads, q_dim)
+        self.self_attn_dp1 = nn.Dropout(dropout)
+        self.self_attn_dp2 = nn.Dropout(dropout)
+    def forward(self, cls_tokens, input_tokens, input_masks):
+        # perform cross-attention
+        q = torch.cat([self.self_attn_q_proj[i](cls_tokens[..., i * self.head_dim: (i+1) * self.head_dim]) for i in range(self.num_heads)], dim=-1)
+        k = torch.cat([self.self_attn_k_proj[i](input_tokens[..., i * self.head_dim: (i+1) * self.head_dim]) for i in range(self.num_heads)], dim=-1)
+        v = torch.cat([self.self_attn_v_proj[i](input_tokens[..., i * self.head_dim: (i+1) * self.head_dim]) for i in range(self.num_heads)], dim=-1)
+        
+        attn, attn_weights = self.self_attn(
+            query=q, key=k, value=v,
+            key_padding_mask=input_masks
+        )
+        x = self.self_attn_ln1((cls_tokens + self.self_attn_dp1(attn)).permute(0,2,1)).permute(0,2,1)
+        x = self.self_attn_ln2((x + self.self_attn_dp2(self.self_attn_ffn(x))).permute(0,2,1)).permute(0,2,1)
+        return x
+class Expert(nn.Module):
+    def __init__(self, d_model, d_ff, dropout=0.1):
+        super().__init__()
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.linear2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.GELU()
+
+    def forward(self, x):
+        return self.linear2(self.dropout(self.activation(self.linear1(x))))
+
+class TopkMoE(nn.Module):
+    def __init__(self, d_model, d_ff, num_experts, top_k=2, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.num_experts = num_experts
+        self.top_k = top_k
+        
+        self.experts = nn.ModuleList([Expert(d_model, d_ff, dropout) for _ in range(num_experts)])
+        self.gate = nn.Linear(d_model, num_experts)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        # x shape: [batch_size, seq_len, d_model]
+        seq_len, batch_size, d_model = x.shape
+        x_flat = x.reshape(-1, d_model)  # [batch_size * seq_len, d_model]
+        
+        # Calculate gate scores
+        gate_logits = self.gate(x_flat)  # [batch_size * seq_len, num_experts]
+        gate_scores = self.softmax(gate_logits)
+        
+        # Top-k selection
+        topk_weights, topk_indices = torch.topk(gate_scores, self.top_k, dim=-1)
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)  # Normalize
+        
+        
+        # Expert routing and computation
+        expert_inputs = []
+        expert_batch_indices = []
+        
+        for expert_idx in range(self.num_experts):
+            # Find tokens assigned to this expert
+            mask = (topk_indices == expert_idx).any(dim=-1)
+            if mask.any():
+                # Get tokens for this expert
+                expert_tokens = x_flat[mask]
+                expert_inputs.append(expert_tokens)
+                expert_batch_indices.append(mask.nonzero(as_tuple=True)[0])
+        
+        # Process through experts
+        expert_outputs = []
+        for idx, (expert, tokens) in enumerate(zip(self.experts, expert_inputs)):
+            expert_outputs.append(expert(tokens))
+        
+        # Combine outputs
+        output_flat = torch.zeros_like(x_flat)
+        for batch_indices, expert_out in zip(expert_batch_indices, expert_outputs):
+            output_flat[batch_indices] = expert_out
+        
+        # Reshape back to original dimensions
+        output = output_flat.reshape(seq_len, batch_size, d_model)
+        
+        # Calculate auxiliary loss for load balancing
+        # aux_loss = self._load_balancing_loss(gate_scores, topk_indices)
+        
+        return output
+
+    def _load_balancing_loss(self, gate_scores, topk_indices):
+        # Calculate fraction of tokens handled by each expert
+        expert_mask = torch.zeros_like(gate_scores).scatter_(
+            1, topk_indices, 1.0
+        )
+        expert_load = expert_mask.sum(dim=0)  # [num_experts]
+        
+        # Calculate gate score sums for each expert
+        gate_score_sums = (gate_scores * expert_mask).sum(dim=0)
+        
+        # Load balancing loss
+        load_balance_loss = (expert_load.float() * gate_score_sums).sum()
+        load_balance_loss = self.num_experts * load_balance_loss / (gate_scores.size(0) ** 2)
+        
+        return load_balance_loss
+
 class TransformerDecoderLayer(nn.Module):
 
-    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1):
+    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1, layer_id=0):
         """
         Parameters:
         -----------
@@ -130,30 +251,73 @@ class TransformerDecoderLayer(nn.Module):
         """
         super().__init__()
         self.q_dim = q_dim
+        self.head_dim = q_dim // num_heads
         self.kv_dim = kv_dim
         self.num_heads = num_heads
         self.inter_head_dim = 32
+        self.h_dim = q_dim // 4
+        self.o_dim = q_dim // 4 * 3
+        self.h_head_num = 2
+        self.o_head_num = num_heads - 2
         self.dropout = dropout
         self.ffn_interm_dim = ffn_interm_dim
-
+        self.layer_id = layer_id
         # ho_queries, all features, codes projections
         self.reg_num = 256
         self.llava_cali_embedding = nn.Embedding(256, q_dim)
         self.register_embedding = nn.Embedding(self.reg_num, q_dim)
-        self.query_adapter = nn.Sequential(
-            nn.Linear(q_dim, ffn_interm_dim),
+        if layer_id == 0:
+            h_query_dim = self.h_dim
+            o_query_dim = self.o_dim
+        else:
+            h_query_dim = q_dim
+            o_query_dim = q_dim
+        self.h_query_adapter = nn.Sequential(
+            nn.Linear(h_query_dim, h_query_dim * 4),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(ffn_interm_dim, q_dim),
-            nn.ReLU(),
-            nn.Linear(q_dim, q_dim // 2)
+            nn.Linear(h_query_dim * 4, self.h_dim//2)
         )
-        self.cls_pos_proj = nn.Linear(kv_dim * 2 + kv_dim * 4, q_dim // 2)
-        self.backbone_proj = nn.Sequential(nn.Linear(kv_dim, ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, q_dim // 2))
-        self.backbone_pos_proj = nn.Sequential(nn.Linear(kv_dim, ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, q_dim // 2))
+        self.o_query_adapter = nn.Sequential(
+            nn.Linear(o_query_dim, o_query_dim * 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(o_query_dim * 4, self.o_dim//2)
+        )
+        
+
+        self.cls_pos_proj = nn.Sequential(
+            nn.Linear(kv_dim * 2 + kv_dim * 4, q_dim),
+            nn.ReLU(),
+            nn.Linear(q_dim, q_dim // num_heads // 2))
+        self.h_feature_proj = nn.Sequential(
+            nn.Linear(self.h_dim, self.h_dim * 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.h_dim * 4, self.h_dim//2)
+        )
+        self.o_feature_proj = nn.Sequential(
+            nn.Linear(self.o_dim, self.o_dim * 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.o_dim * 4, self.o_dim//2)
+        )
+        self.backbone_pos_proj_h = nn.Linear(q_dim, self.h_dim // 2)
+        self.backbone_pos_proj_o = nn.Linear(q_dim, self.o_dim // 2)
+
         self.answer_proj = nn.Sequential(nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, q_dim))
-        self.clip_token_proj = nn.Sequential(
-            nn.Linear(1024, ffn_interm_dim),
+        self.clip_token_proj_h = nn.Sequential(
+            nn.Linear(1536, ffn_interm_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, self.h_dim))
+        self.clip_token_proj_o = nn.Sequential(
+            nn.Linear(1536, ffn_interm_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, self.o_dim))
+        self.clip_cls_token_proj = nn.Sequential(
+            nn.Linear(1536, ffn_interm_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(ffn_interm_dim, q_dim))
@@ -163,19 +327,26 @@ class TransformerDecoderLayer(nn.Module):
         # self-attn
         
         self.self_attn = MultiheadAttention(q_dim, self.num_heads, dropout=dropout)
-        self.self_attn_q_proj = nn.Linear(q_dim, q_dim)
-        self.self_attn_k_proj = nn.Linear(q_dim, q_dim)
-        self.self_attn_v_proj = nn.Linear(q_dim, q_dim)
+        self.self_attn_q_proj_h = nn.Linear(self.h_dim, self.h_dim)
+        self.self_attn_k_proj_h = nn.Linear(self.h_dim, self.h_dim)
+        self.self_attn_v_proj_h = nn.Linear(self.h_dim, self.h_dim)
+        self.self_attn_q_proj_o = nn.Linear(self.o_dim, self.o_dim)
+        self.self_attn_k_proj_o = nn.Linear(self.o_dim, self.o_dim)
+        self.self_attn_v_proj_o = nn.Linear(self.o_dim, self.o_dim)
+        # self.self_attn_q_proj = nn.ModuleList([nn.Linear(q_dim // num_heads, q_dim // num_heads) for _ in range(num_heads)])
+        # self.self_attn_k_proj = nn.ModuleList([nn.Linear(q_dim // num_heads, q_dim // num_heads) for _ in range(num_heads)])
+        # self.self_attn_v_proj = nn.ModuleList([nn.Linear(q_dim // num_heads, q_dim // num_heads) for _ in range(num_heads)])
         self.self_attn_ffn = nn.Sequential(
             nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
             nn.Linear(ffn_interm_dim, q_dim)
         )
+        # self.self_attn_ffn = TopkMoE(q_dim, ffn_interm_dim, 4, 2, 0.1)
         self.self_attn_ln1 = nn.LayerNorm(q_dim)
         self.self_attn_ln2 = nn.LayerNorm(q_dim)
         self.self_attn_dp1 = nn.Dropout(dropout)
         self.self_attn_dp2 = nn.Dropout(dropout)
     def forward(self,
-            queries: Tensor, intermediate:List[Tensor], features: Tensor,
+            queries: Tensor, layer_id:int, features: Tensor,
             q_pos: Tensor, k_pos: Tensor,
             q_attn_mask: Optional[Tensor] = None,
             qk_attn_mask: Optional[Tensor] = None,
@@ -211,58 +382,90 @@ class TransformerDecoderLayer(nn.Module):
         queries: Tensor
         """
         # process cls token
-        q = self.query_adapter(queries)
+        if layer_id == 0:
+            q_h = self.h_query_adapter(queries[..., :self.h_dim])
+            q_o = self.o_query_adapter(queries[..., self.h_dim:])
+        else:
+            q_h = self.h_query_adapter(queries)
+            q_o = self.o_query_adapter(queries)
         q_p = self.cls_pos_proj(torch.cat((q_pos["centre"], q_pos["box"]), dim=-1))
-        n_q, bs, _ = q.shape
-        q = q.view(n_q, bs, self.inter_head_dim, self.q_dim // self.inter_head_dim // 2)
-        q_p = q_p.view(n_q, bs, self.inter_head_dim, self.q_dim // self.inter_head_dim // 2)
-        cls_token = torch.cat([q, q_p], dim=3).view(n_q, bs, self.q_dim)
+        n_q, bs, _ = q_p.shape
+        q_h = q_h.view(n_q, bs, self.h_head_num, self.h_dim // 2 // self.h_head_num)
+        q_o = q_o.view(n_q, bs, self.o_head_num, self.o_dim // 2 // self.o_head_num)
+        q_p = q_p.unsqueeze(-2)
+        q_h = torch.cat((q_h, q_p.repeat(1,1,self.h_head_num, 1)), dim=-1).view(n_q, bs, self.h_dim)
+        q_o = torch.cat((q_o, q_p.repeat(1,1,self.o_head_num, 1)), dim=-1).view(n_q, bs, self.o_dim)
+        cls_token = torch.cat([q_h, q_o], dim=-1)
         num_cls_token = len(cls_token)
 
         # process vision token
-        backbone_token = self.backbone_proj(features)
-        backbone_token_pos = self.backbone_pos_proj(k_pos)
-        hw, _, _ = backbone_token.shape
-        backbone_token = backbone_token.view(hw, bs, self.inter_head_dim, self.q_dim // self.inter_head_dim // 2)
-        backbone_token_pos = backbone_token_pos.view(hw, bs, self.inter_head_dim, self.q_dim // self.inter_head_dim // 2)
-        backbone_token = torch.cat([backbone_token, backbone_token_pos], dim=3).view(hw, bs, self.q_dim)
-        clip_token = self.clip_token_proj(llava_feature)
-        vision_token = torch.cat((backbone_token, clip_token), dim=0)
+        hw, bs, feature_dim = features.shape
+        h_feature_pos = self.backbone_pos_proj_h(k_pos).view(hw, bs, self.h_head_num, self.h_dim // self.h_head_num // 2)
+        o_feature_pos = self.backbone_pos_proj_o(k_pos).view(hw, bs, self.o_head_num, self.o_dim // self.o_head_num // 2)
+        h_feature = self.h_feature_proj(features[..., :self.h_dim]).view(hw, bs, self.h_head_num, self.h_dim // self.h_head_num // 2)
+        o_feature = self.o_feature_proj(features[..., self.h_dim:]).view(hw, bs, self.o_head_num, self.o_dim // self.o_head_num // 2)
+        
+        backbone_token = torch.cat((
+            torch.cat((h_feature, h_feature_pos), dim=-1).view(hw, bs, self.h_dim), 
+            torch.cat((o_feature, o_feature_pos), dim=-1).view(hw, bs, self.o_dim)
+        ), dim=-1)
+        clip_token = torch.cat((
+            self.clip_token_proj_h(llava_feature[:-1]), self.clip_token_proj_o(llava_feature[:-1])
+        ), dim=-1)
+        clip_token = torch.cat((
+            clip_token, self.clip_cls_token_proj(llava_feature[-1]).unsqueeze(0)
+        ), dim=0).unsqueeze(1)
         num_backbone_token = len(backbone_token)
         num_clip_token = len(clip_token)
 
         # process answer token
         answer_token = self.llava_cali_embedding.weight[llava_answer_idx.unique()].unsqueeze(1)
         answer_token = self.answer_proj(answer_token)
-
+        num_answer_token = len(answer_token)
         # register token
         reg_token = self.register_embedding.weight.unsqueeze(1)
 
         # concatenate all tokens
-        if len(intermediate) == 0:
-            input_tokens = self.input_token_ln(torch.cat((cls_token, vision_token, answer_token, reg_token), dim=0))
-        else: # check history memory
-            input_tokens = self.input_token_ln(torch.cat((cls_token, vision_token, answer_token, reg_token, torch.cat(intermediate, dim=0)), dim=0))
+        input_tokens = torch.cat((cls_token, backbone_token, clip_token, answer_token, reg_token), dim=0)
+        input_tokens = self.input_token_ln(input_tokens)
+
         input_masks = torch.zeros_like(input_tokens[:, :, 0]).to(torch.bool).transpose(0, 1)
         input_masks[:, num_cls_token:num_backbone_token+num_cls_token] = kv_padding_mask
         # perform self-attention
-        q = self.self_attn_q_proj(input_tokens)
-        k = self.self_attn_k_proj(input_tokens)
-        v = self.self_attn_v_proj(input_tokens)
+        q = torch.cat((
+            self.self_attn_q_proj_h(cls_token[..., :self.h_dim]), self.self_attn_q_proj_o(cls_token[..., self.h_dim:])
+        ), dim=-1)
+        k = torch.cat((
+            self.self_attn_k_proj_h(input_tokens[..., :self.h_dim]), self.self_attn_k_proj_o(input_tokens[..., self.h_dim:])
+        ), dim=-1)
+        v = torch.cat((
+            self.self_attn_v_proj_h(input_tokens[..., :self.h_dim]), self.self_attn_v_proj_o(input_tokens[..., self.h_dim:])
+        ), dim=-1)
+        # q = torch.cat([self.self_attn_q_proj[i](cls_token[..., i * self.head_dim: (i+1) * self.head_dim]) for i in range(self.num_heads)], dim=-1)
+        # k = torch.cat([self.self_attn_k_proj[i](input_tokens[..., i * self.head_dim: (i+1) * self.head_dim]) for i in range(self.num_heads)], dim=-1)
+        # v = torch.cat([self.self_attn_v_proj[i](input_tokens[..., i * self.head_dim: (i+1) * self.head_dim]) for i in range(self.num_heads)], dim=-1)
+        
         attn, attn_weights = self.self_attn(
             query=q, key=k, value=v,
             key_padding_mask=input_masks
         )
-        x = self.self_attn_ln1(input_tokens + self.self_attn_dp1(attn))
-        x = self.self_attn_ln2(x + self.self_attn_dp2(self.self_attn_ffn(x)))
+        x = self.self_attn_ln1((cls_token + self.self_attn_dp1(attn)))
+        x = self.self_attn_ln2((x + self.self_attn_dp2(self.self_attn_ffn(x))))
 
-        return x[:num_cls_token]
+        return x
 
 class TransformerDecoder(nn.Module):
 
-    def __init__(self, decoder_layer, num_layers, return_intermediate=True):
+    def __init__(self, decoder_layer:TransformerDecoderLayer, num_layers, return_intermediate=True):
         super().__init__()
-        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
+        
+        layers = []
+        for i in range(num_layers):
+            layers.append(
+                TransformerDecoderLayer(
+                    decoder_layer.q_dim, decoder_layer.kv_dim, 
+                    decoder_layer.num_heads, decoder_layer.ffn_interm_dim, layer_id=i))
+        self.layers = nn.ModuleList(layers)
         self.num_layers = num_layers
         self.norm = nn.LayerNorm(decoder_layer.q_dim)
         self.return_intermediate = return_intermediate
@@ -295,12 +498,12 @@ class TransformerDecoder(nn.Module):
         output = queries
         intermediate = []
 
-        for layer in self.layers:
-            history = [queries]
-            history.extend(intermediate)
-            history.pop(-1)
+        for idx, layer in enumerate(self.layers):
+            # history = [queries]
+            # history.extend(intermediate)
+            # history.pop(-1)
             output = layer(
-                output, [], features,
+                output, idx, features,
                 q_attn_mask=q_attn_mask,
                 qk_attn_mask=qk_attn_mask,
                 q_padding_mask=q_padding_mask,
@@ -318,6 +521,173 @@ class TransformerDecoder(nn.Module):
             # output = output.unsqueeze(0)
         return output
 
+class TransformerDecoder2(nn.Module):
+
+    def __init__(self, decoder_layer:TransformerDecoderLayer, num_layers, return_intermediate=True):
+        super().__init__()
+        # self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
+        self.num_layers = num_layers
+        self.norm = nn.LayerNorm(decoder_layer.q_dim)
+        q_dim = decoder_layer.q_dim
+        dropout = decoder_layer.dropout
+        kv_dim = decoder_layer.kv_dim
+        num_heads = decoder_layer.num_heads
+        ffn_interm_dim = decoder_layer.ffn_interm_dim
+
+        self.return_intermediate = return_intermediate
+        self.q_dim = q_dim
+        self.head_dim = decoder_layer.head_dim
+        self.kv_dim = kv_dim
+        self.num_heads = num_heads
+        self.inter_head_dim = 32
+        self.h_dim = decoder_layer.h_dim
+        self.o_dim = decoder_layer.o_dim
+        self.h_head_num = decoder_layer.h_head_num
+        self.o_head_num = decoder_layer.o_head_num
+        self.dropout = dropout
+        self.ffn_interm_dim = ffn_interm_dim
+
+        # ho_queries, all features, codes projections
+        self.reg_num = 256
+        self.llava_cali_embedding = nn.Embedding(256, q_dim)
+        self.register_embedding = nn.Embedding(self.reg_num, q_dim)
+        self.h_query_adapter = nn.Sequential(
+            nn.Linear(self.h_dim, self.h_dim * 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.h_dim * 4, self.h_dim//2)
+        )
+        self.o_query_adapter = nn.Sequential(
+            nn.Linear(self.o_dim, self.o_dim * 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.o_dim * 4, self.o_dim//2)
+        )
+        self.cls_pos_proj = nn.Sequential(
+            nn.Linear(kv_dim * 2 + kv_dim * 4, q_dim),
+            nn.ReLU(),
+            nn.Linear(q_dim, q_dim // num_heads // 2))
+        self.h_feature_proj = nn.Sequential(
+            nn.Linear(self.h_dim, self.h_dim * 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.h_dim * 4, self.h_dim//2)
+        )
+        self.o_feature_proj = nn.Sequential(
+            nn.Linear(self.o_dim, self.o_dim * 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.o_dim * 4, self.o_dim//2)
+        )
+        self.backbone_pos_proj_h = nn.Linear(q_dim, self.h_dim // 2)
+        self.backbone_pos_proj_o = nn.Linear(q_dim, self.o_dim // 2)
+
+        self.answer_proj = nn.Sequential(nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, q_dim))
+        self.clip_token_proj_h = nn.Sequential(
+            nn.Linear(1024, ffn_interm_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, self.h_dim))
+        self.clip_token_proj_o = nn.Sequential(
+                nn.Linear(1024, ffn_interm_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(ffn_interm_dim, self.o_dim))
+        self.input_token_ln = nn.GroupNorm(num_heads, q_dim)
+
+        # self.self_attn_blocks = nn.ModuleList([SelfAttnBlock(q_dim=q_dim, ffn_interm_dim=ffn_interm_dim, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)])
+        self.cross_attn_blocks = nn.ModuleList([CrossAttnBlock(q_dim=q_dim, ffn_interm_dim=ffn_interm_dim, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)])
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, queries, features,
+            q_attn_mask: Optional[Tensor] = None,
+            qk_attn_mask: Optional[Tensor] = None,
+            q_padding_mask: Optional[Tensor] = None,
+            kv_padding_mask: Optional[Tensor] = None,
+            q_pos: Optional[Tensor] = None,
+            k_pos: Optional[Tensor] = None,
+            llava_answer_idx:Optional[Tensor] = None,
+            llava_feature:Optional[Tensor] = None
+        ):
+        # Add support for zero layers
+        if self.num_layers == 0:
+            return queries.unsqueeze(0)
+        # Explicitly handle zero-size queries
+        if queries.numel() == 0:
+            rp = self.num_layers if self.return_intermediate else 1
+            return queries.unsqueeze(0).repeat(rp, 1, 1, 1)
+
+        # process cls token
+        q_h = self.h_query_adapter(queries[..., :self.h_dim])
+        q_o = self.o_query_adapter(queries[..., self.h_dim:])
+        q_p = self.cls_pos_proj(torch.cat((q_pos["centre"], q_pos["box"]), dim=-1))
+        n_q, bs, _ = q_p.shape
+        q_h = q_h.view(n_q, bs, self.h_head_num, self.h_dim // 2 // self.h_head_num)
+        q_o = q_o.view(n_q, bs, self.o_head_num, self.o_dim // 2 // self.o_head_num)
+        q_p = q_p.unsqueeze(-2)
+        q_h = torch.cat((q_h, q_p.repeat(1,1,self.h_head_num, 1)), dim=-1).view(n_q, bs, self.h_dim)
+        q_o = torch.cat((q_o, q_p.repeat(1,1,self.o_head_num, 1)), dim=-1).view(n_q, bs, self.o_dim)
+        cls_token = torch.cat([q_h, q_o], dim=-1)
+        num_cls_token = len(cls_token)
+
+        # process vision token
+        hw, bs, feature_dim = features.shape
+        h_feature_pos = self.backbone_pos_proj_h(k_pos).view(hw, bs, self.h_head_num, self.h_dim // self.h_head_num // 2)
+        o_feature_pos = self.backbone_pos_proj_o(k_pos).view(hw, bs, self.o_head_num, self.o_dim // self.o_head_num // 2)
+        h_feature = self.h_feature_proj(features[..., :self.h_dim]).view(hw, bs, self.h_head_num, self.h_dim // self.h_head_num // 2)
+        o_feature = self.o_feature_proj(features[..., self.h_dim:]).view(hw, bs, self.o_head_num, self.o_dim // self.o_head_num // 2)
+        
+        backbone_token = torch.cat((
+            torch.cat((h_feature, h_feature_pos), dim=-1).view(hw, bs, self.h_dim), 
+            torch.cat((o_feature, o_feature_pos), dim=-1).view(hw, bs, self.o_dim)
+        ), dim=-1)
+        clip_token = torch.cat((
+            self.clip_token_proj_h(llava_feature), self.clip_token_proj_o(llava_feature)
+        ), dim=-1)
+        num_backbone_token = len(backbone_token)
+        num_clip_token = len(clip_token)
+
+        # process answer token
+        answer_token = self.llava_cali_embedding.weight[llava_answer_idx.unique()].unsqueeze(1)
+        answer_token = self.answer_proj(answer_token)
+        num_answer_token = len(answer_token)
+        # register token
+        reg_token = self.register_embedding.weight.unsqueeze(1)
+
+        # concatenate all tokens
+        input_tokens = torch.cat((cls_token, backbone_token, clip_token, answer_token, reg_token), dim=0)
+        input_tokens = self.input_token_ln(input_tokens.permute(0,2,1)).permute(0,2,1)
+
+        input_masks = torch.zeros_like(input_tokens[:, :, 0]).to(torch.bool).transpose(0, 1)
+        input_masks[:, num_cls_token:num_backbone_token+num_cls_token] = kv_padding_mask
+
+        output = queries
+        intermediate = []
+
+        # for layer in self.self_attn_blocks:
+        #     input_tokens = layer(
+        #         input_tokens=input_tokens, input_masks=input_masks
+        #     )
+        for layer in self.cross_attn_blocks:
+            output = layer(
+                cls_tokens=output, input_tokens=input_tokens, input_masks=input_masks
+            )
+            if self.return_intermediate:
+                intermediate.append(self.norm(output))
+                # intermediate.append(output)
+
+        if self.return_intermediate:
+            output = torch.stack(intermediate)
+        else:
+            output = self.norm(output).unsqueeze(0)
+            # output = output.unsqueeze(0)
+        return output
 
 def _get_relative_position_bias(
     relative_position_bias_table: torch.Tensor, relative_position_index: torch.Tensor, window_size: List[int]
@@ -791,7 +1161,7 @@ class SwinTransformerBlockV2(SwinTransformerBlock):
 
 class SwinTransformer(nn.Module):
 
-    def __init__(self, dim, num_layers):
+    def __init__(self, dim, num_layers, num_heads):
         """
         A feature stage consisting of a series of Swin Transformer V2 blocks.
 
@@ -804,7 +1174,7 @@ class SwinTransformer(nn.Module):
         self.dim = dim
 
         self.depth = num_layers
-        self.num_heads = dim // 32
+        self.num_heads = num_heads
         self.window_size = 8
         self.base_sd_prob = 0.2
 

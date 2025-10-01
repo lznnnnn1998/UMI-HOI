@@ -295,7 +295,7 @@ class CustomisedDLE(DistributedLearningEngine):
                 torch.save(checkpoint, os.path.join(self._cache_dir, "best.pth"))
         # if self._state.lr_scheduler is not None:
         #     self._state.lr_scheduler.step()
-        if perf[0] > 0.388 and self.steped==False:
+        if perf[0] > 0.4120 and self.steped==False:
             self._state.lr_scheduler.step()
             self.steped = True
 
