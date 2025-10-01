@@ -521,29 +521,28 @@ class TransformerDecoder(nn.Module):
             # output = output.unsqueeze(0)
         return output
 
-class TransformerDecoder2(nn.Module):
+class TransformerDecoderLayerNoTaskSpecified(nn.Module):
 
-    def __init__(self, decoder_layer:TransformerDecoderLayer, num_layers, return_intermediate=True):
+    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1):
+        """
+        Parameters:
+        -----------
+        q_dim: int
+            Dimension of the interaction queries.
+        kv_dim: int
+            Dimension of the image features.
+        num_heads: int
+            Number of heads used in multihead attention.
+        ffn_interm_dim: int
+            Dimension of the intermediate representation in the feedforward network.
+        dropout: float, default: 0.1
+            Dropout percentage used during training.
+        """
         super().__init__()
-        # self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
-        self.num_layers = num_layers
-        self.norm = nn.LayerNorm(decoder_layer.q_dim)
-        q_dim = decoder_layer.q_dim
-        dropout = decoder_layer.dropout
-        kv_dim = decoder_layer.kv_dim
-        num_heads = decoder_layer.num_heads
-        ffn_interm_dim = decoder_layer.ffn_interm_dim
-
-        self.return_intermediate = return_intermediate
         self.q_dim = q_dim
-        self.head_dim = decoder_layer.head_dim
         self.kv_dim = kv_dim
         self.num_heads = num_heads
         self.inter_head_dim = 32
-        self.h_dim = decoder_layer.h_dim
-        self.o_dim = decoder_layer.o_dim
-        self.h_head_num = decoder_layer.h_head_num
-        self.o_head_num = decoder_layer.o_head_num
         self.dropout = dropout
         self.ffn_interm_dim = ffn_interm_dim
 
@@ -551,52 +550,132 @@ class TransformerDecoder2(nn.Module):
         self.reg_num = 256
         self.llava_cali_embedding = nn.Embedding(256, q_dim)
         self.register_embedding = nn.Embedding(self.reg_num, q_dim)
-        self.h_query_adapter = nn.Sequential(
-            nn.Linear(self.h_dim, self.h_dim * 4),
+        self.query_adapter = nn.Sequential(
+            nn.Linear(q_dim, ffn_interm_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(self.h_dim * 4, self.h_dim//2)
-        )
-        self.o_query_adapter = nn.Sequential(
-            nn.Linear(self.o_dim, self.o_dim * 4),
+            nn.Linear(ffn_interm_dim, q_dim),
             nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(self.o_dim * 4, self.o_dim//2)
+            nn.Linear(q_dim, q_dim // 2)
         )
-        self.cls_pos_proj = nn.Sequential(
-            nn.Linear(kv_dim * 2 + kv_dim * 4, q_dim),
-            nn.ReLU(),
-            nn.Linear(q_dim, q_dim // num_heads // 2))
-        self.h_feature_proj = nn.Sequential(
-            nn.Linear(self.h_dim, self.h_dim * 4),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(self.h_dim * 4, self.h_dim//2)
-        )
-        self.o_feature_proj = nn.Sequential(
-            nn.Linear(self.o_dim, self.o_dim * 4),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(self.o_dim * 4, self.o_dim//2)
-        )
-        self.backbone_pos_proj_h = nn.Linear(q_dim, self.h_dim // 2)
-        self.backbone_pos_proj_o = nn.Linear(q_dim, self.o_dim // 2)
-
+        self.cls_pos_proj = nn.Linear(kv_dim * 2 + kv_dim * 4, q_dim // 2)
+        self.backbone_proj = nn.Sequential(nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, q_dim // 2))
+        self.backbone_pos_proj = nn.Sequential(nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, q_dim // 2))
         self.answer_proj = nn.Sequential(nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, q_dim))
-        self.clip_token_proj_h = nn.Sequential(
-            nn.Linear(1024, ffn_interm_dim),
+        self.clip_token_proj = nn.Sequential(
+            nn.Linear(1536, ffn_interm_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(ffn_interm_dim, self.h_dim))
-        self.clip_token_proj_o = nn.Sequential(
-                nn.Linear(1024, ffn_interm_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(ffn_interm_dim, self.o_dim))
-        self.input_token_ln = nn.GroupNorm(num_heads, q_dim)
+            nn.Linear(ffn_interm_dim, q_dim))
+        self.input_token_ln = nn.LayerNorm(q_dim)
 
-        # self.self_attn_blocks = nn.ModuleList([SelfAttnBlock(q_dim=q_dim, ffn_interm_dim=ffn_interm_dim, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)])
-        self.cross_attn_blocks = nn.ModuleList([CrossAttnBlock(q_dim=q_dim, ffn_interm_dim=ffn_interm_dim, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)])
+        
+        # self-attn
+        
+        self.self_attn = MultiheadAttention(q_dim, self.num_heads, dropout=dropout)
+        self.self_attn_q_proj = nn.Linear(q_dim, q_dim)
+        self.self_attn_k_proj = nn.Linear(q_dim, q_dim)
+        self.self_attn_v_proj = nn.Linear(q_dim, q_dim)
+        self.self_attn_ffn = nn.Sequential(
+            nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(ffn_interm_dim, q_dim)
+        )
+        self.self_attn_ln1 = nn.LayerNorm(q_dim)
+        self.self_attn_ln2 = nn.LayerNorm(q_dim)
+        self.self_attn_dp1 = nn.Dropout(dropout)
+        self.self_attn_dp2 = nn.Dropout(dropout)
+    def forward(self,
+            queries: Tensor, intermediate:List[Tensor], features: Tensor,
+            q_pos: Tensor, k_pos: Tensor,
+            q_attn_mask: Optional[Tensor] = None,
+            qk_attn_mask: Optional[Tensor] = None,
+            q_padding_mask: Optional[Tensor] = None,
+            kv_padding_mask: Optional[Tensor] = None,
+            llava_answer_idx:Optional[Tensor] = None,
+            llava_feature: Optional[Tensor] = None
+        ):
+        """
+        Parameters:
+        -----------
+        queries: Tensor
+            Interaction queries of size (N, B, K).
+        features: Tensor
+            Image features of size (HW, B, C).
+        q_attn_mask: Tensor, default: None
+            Attention mask to be applied during the self attention of queries.
+        qk_attn_mask: Tensor, default: None
+            Attention mask to be applied during the cross attention from image
+            features to interaction queries.
+        q_padding_mask: Tensor, default: None
+            Padding mask for interaction queries of size (B, N). Values of `True`
+            indicate the corresponding query was padded and to be ignored.
+        kv_padding_mask: Tensor, default: None
+            Padding mask for image features of size (B, HW).
+        q_pos: Tensor, default: None
+            Positional encodings for the interaction queries.
+        k_pos: Tensor, default: None
+            Positional encodings for the image features.
+
+        Returns:
+        --------
+        queries: Tensor
+        """
+        # process cls token
+        q = self.query_adapter(queries)
+        q_p = self.cls_pos_proj(torch.cat((q_pos["centre"], q_pos["box"]), dim=-1))
+        n_q, bs, _ = q.shape
+        q = q.view(n_q, bs, self.inter_head_dim, self.q_dim // self.inter_head_dim // 2)
+        q_p = q_p.view(n_q, bs, self.inter_head_dim, self.q_dim // self.inter_head_dim // 2)
+        cls_token = torch.cat([q, q_p], dim=3).view(n_q, bs, self.q_dim)
+        num_cls_token = len(cls_token)
+
+        # process vision token
+        backbone_token = self.backbone_proj(features)
+        backbone_token_pos = self.backbone_pos_proj(k_pos)
+        hw, _, _ = backbone_token.shape
+        backbone_token = backbone_token.view(hw, bs, self.inter_head_dim, self.q_dim // self.inter_head_dim // 2)
+        backbone_token_pos = backbone_token_pos.view(hw, bs, self.inter_head_dim, self.q_dim // self.inter_head_dim // 2)
+        backbone_token = torch.cat([backbone_token, backbone_token_pos], dim=3).view(hw, bs, self.q_dim)
+        clip_token = self.clip_token_proj(llava_feature).unsqueeze(1)
+        vision_token = torch.cat((backbone_token, clip_token), dim=0)
+        num_backbone_token = len(backbone_token)
+        num_clip_token = len(clip_token)
+
+        # process answer token
+        answer_token = self.llava_cali_embedding.weight[llava_answer_idx.unique()].unsqueeze(1)
+        answer_token = self.answer_proj(answer_token)
+
+        # register token
+        reg_token = self.register_embedding.weight.unsqueeze(1)
+
+        # concatenate all tokens
+        if len(intermediate) == 0:
+            input_tokens = self.input_token_ln(torch.cat((cls_token, vision_token, answer_token, reg_token), dim=0))
+        else: # check history memory
+            input_tokens = self.input_token_ln(torch.cat((cls_token, vision_token, answer_token, reg_token, torch.cat(intermediate, dim=0)), dim=0))
+        input_masks = torch.zeros_like(input_tokens[:, :, 0]).to(torch.bool).transpose(0, 1)
+        input_masks[:, num_cls_token:num_backbone_token+num_cls_token] = kv_padding_mask
+        # perform self-attention
+        q = self.self_attn_q_proj(cls_token)
+        k = self.self_attn_k_proj(input_tokens)
+        v = self.self_attn_v_proj(input_tokens)
+        attn, attn_weights = self.self_attn(
+            query=q, key=k, value=v,
+            key_padding_mask=input_masks
+        )
+        x = self.self_attn_ln1(cls_token + self.self_attn_dp1(attn))
+        x = self.self_attn_ln2(x + self.self_attn_dp2(self.self_attn_ffn(x)))
+        # DETR=base CUDA_VISIBLE_DEVICES=0 python main.py --world-size 1 --pretrained /home/pvic/detr-r50-hicodet.pth --output-dir /home/MasterThesis/pvic/log/hico_r50_encoder_only_answer9_clipselfattn --port 1234 --epoch 15 --llava-answer-path /home/MasterThesis/hico_llava_answer_9 --llava-token-path /home/MasterThesis/hico_siglip_feature --repr-dim 512 --lr-drop 1
+        return x
+
+class TransformerDecoderNoTaskSpecified(nn.Module):
+
+    def __init__(self, decoder_layer, num_layers, return_intermediate=True):
+        super().__init__()
+        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for i in range(num_layers)])
+        self.num_layers = num_layers
+        self.norm = nn.LayerNorm(decoder_layer.q_dim)
+        self.return_intermediate = return_intermediate
 
         self._reset_parameters()
 
@@ -623,60 +702,20 @@ class TransformerDecoder2(nn.Module):
             rp = self.num_layers if self.return_intermediate else 1
             return queries.unsqueeze(0).repeat(rp, 1, 1, 1)
 
-        # process cls token
-        q_h = self.h_query_adapter(queries[..., :self.h_dim])
-        q_o = self.o_query_adapter(queries[..., self.h_dim:])
-        q_p = self.cls_pos_proj(torch.cat((q_pos["centre"], q_pos["box"]), dim=-1))
-        n_q, bs, _ = q_p.shape
-        q_h = q_h.view(n_q, bs, self.h_head_num, self.h_dim // 2 // self.h_head_num)
-        q_o = q_o.view(n_q, bs, self.o_head_num, self.o_dim // 2 // self.o_head_num)
-        q_p = q_p.unsqueeze(-2)
-        q_h = torch.cat((q_h, q_p.repeat(1,1,self.h_head_num, 1)), dim=-1).view(n_q, bs, self.h_dim)
-        q_o = torch.cat((q_o, q_p.repeat(1,1,self.o_head_num, 1)), dim=-1).view(n_q, bs, self.o_dim)
-        cls_token = torch.cat([q_h, q_o], dim=-1)
-        num_cls_token = len(cls_token)
-
-        # process vision token
-        hw, bs, feature_dim = features.shape
-        h_feature_pos = self.backbone_pos_proj_h(k_pos).view(hw, bs, self.h_head_num, self.h_dim // self.h_head_num // 2)
-        o_feature_pos = self.backbone_pos_proj_o(k_pos).view(hw, bs, self.o_head_num, self.o_dim // self.o_head_num // 2)
-        h_feature = self.h_feature_proj(features[..., :self.h_dim]).view(hw, bs, self.h_head_num, self.h_dim // self.h_head_num // 2)
-        o_feature = self.o_feature_proj(features[..., self.h_dim:]).view(hw, bs, self.o_head_num, self.o_dim // self.o_head_num // 2)
-        
-        backbone_token = torch.cat((
-            torch.cat((h_feature, h_feature_pos), dim=-1).view(hw, bs, self.h_dim), 
-            torch.cat((o_feature, o_feature_pos), dim=-1).view(hw, bs, self.o_dim)
-        ), dim=-1)
-        clip_token = torch.cat((
-            self.clip_token_proj_h(llava_feature), self.clip_token_proj_o(llava_feature)
-        ), dim=-1)
-        num_backbone_token = len(backbone_token)
-        num_clip_token = len(clip_token)
-
-        # process answer token
-        answer_token = self.llava_cali_embedding.weight[llava_answer_idx.unique()].unsqueeze(1)
-        answer_token = self.answer_proj(answer_token)
-        num_answer_token = len(answer_token)
-        # register token
-        reg_token = self.register_embedding.weight.unsqueeze(1)
-
-        # concatenate all tokens
-        input_tokens = torch.cat((cls_token, backbone_token, clip_token, answer_token, reg_token), dim=0)
-        input_tokens = self.input_token_ln(input_tokens.permute(0,2,1)).permute(0,2,1)
-
-        input_masks = torch.zeros_like(input_tokens[:, :, 0]).to(torch.bool).transpose(0, 1)
-        input_masks[:, num_cls_token:num_backbone_token+num_cls_token] = kv_padding_mask
-
         output = queries
         intermediate = []
 
-        # for layer in self.self_attn_blocks:
-        #     input_tokens = layer(
-        #         input_tokens=input_tokens, input_masks=input_masks
-        #     )
-        for layer in self.cross_attn_blocks:
+        for layer in self.layers:
+            history = [queries]
+            history.extend(intermediate)
+            history.pop(-1)
             output = layer(
-                cls_tokens=output, input_tokens=input_tokens, input_masks=input_masks
+                output, [], features,
+                q_attn_mask=q_attn_mask,
+                qk_attn_mask=qk_attn_mask,
+                q_padding_mask=q_padding_mask,
+                kv_padding_mask=kv_padding_mask,
+                q_pos=q_pos, k_pos=k_pos,llava_answer_idx=llava_answer_idx, llava_feature=llava_feature
             )
             if self.return_intermediate:
                 intermediate.append(self.norm(output))

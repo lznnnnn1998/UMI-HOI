@@ -22,7 +22,8 @@ from transformers_ import (
     TransformerDecoder,
     TransformerDecoderLayer,
     SwinTransformer,
-    TransformerDecoder2
+    TransformerDecoderNoTaskSpecified,
+    TransformerDecoderLayerNoTaskSpecified,
 )
 
 from ops import (
@@ -60,6 +61,109 @@ class MultiModalFusion(nn.Module):
         z = F.relu(torch.cat([x, y], dim=-1))
         z = self.mlp(z)
         return z
+class HumanObjectMatcherNoTaskSpecified(nn.Module):
+    def __init__(self, repr_size, num_verbs, obj_to_verb, dropout=.1, human_idx=0):
+        super().__init__()
+        self.repr_size = repr_size
+        self.num_verbs = num_verbs
+        self.human_idx = human_idx
+        self.obj_to_verb = obj_to_verb
+
+        self.ref_anchor_head = nn.Sequential(
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 2)
+        )
+        self.spatial_head = nn.Sequential(
+            nn.Linear(36, 128), nn.ReLU(),
+            nn.Linear(128, 256), nn.ReLU(),
+            nn.Linear(256, repr_size), nn.ReLU(),
+        )
+        self.encoder = TransformerEncoder(num_layers=2, dropout=dropout)
+        self.mmf = MultiModalFusion(512, repr_size, repr_size)
+
+    def check_human_instances(self, labels):
+        is_human = labels == self.human_idx
+        n_h = torch.sum(is_human)
+        if not torch.all(labels[:n_h]==self.human_idx):
+            raise AssertionError("Human instances are not permuted to the top!")
+        return n_h
+
+    def compute_box_pe(self, boxes, embeds, image_size):
+        bx_norm = boxes / image_size[[1, 0, 1, 0]]
+        bx_c = (bx_norm[:, :2] + bx_norm[:, 2:]) / 2
+        b_wh = bx_norm[:, 2:] - bx_norm[:, :2]
+
+        c_pe = compute_sinusoidal_pe(bx_c[:, None], 20).squeeze(1)
+        wh_pe = compute_sinusoidal_pe(b_wh[:, None], 20).squeeze(1)
+
+        box_pe = torch.cat([c_pe, wh_pe], dim=-1)
+
+        # Modulate the positional embeddings with box widths and heights by
+        # applying different temperatures to x and y
+        ref_hw_cond = self.ref_anchor_head(embeds).sigmoid()    # n_query, 2
+        # Note that the positional embeddings are stacked as [pe(y), pe(x)]
+        c_pe[..., :128] *= (ref_hw_cond[:, 1] / b_wh[:, 1]).unsqueeze(-1)
+        c_pe[..., 128:] *= (ref_hw_cond[:, 0] / b_wh[:, 0]).unsqueeze(-1)
+
+        return box_pe, c_pe
+
+    def forward(self, region_props, image_sizes, device=None):
+        if device is None:
+            device = region_props[0]["hidden_states"].device
+
+        ho_queries = []
+        paired_indices = []
+        prior_scores = []
+        object_types = []
+        positional_embeds = []
+        for i, rp in enumerate(region_props):
+            boxes, scores, labels, embeds = rp.values()
+            nh = self.check_human_instances(labels)
+            n = len(boxes)
+            # Enumerate instance pairs
+            x, y = torch.meshgrid(
+                torch.arange(n, device=device),
+                torch.arange(n, device=device)
+            )
+            x_keep, y_keep = torch.nonzero(torch.logical_and(x != y, x < nh)).unbind(1)
+            # Skip image when there are no valid human-object pairs
+            if len(x_keep) == 0:
+                ho_queries.append(torch.zeros(0, self.repr_size, device=device))
+                paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
+                prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
+                object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
+                positional_embeds.append({})
+                continue
+            x = x.flatten(); y = y.flatten()
+            # Compute spatial features
+            pairwise_spatial = compute_spatial_encodings(
+                [boxes[x],], [boxes[y],], [image_sizes[i],]
+            )
+            pairwise_spatial = self.spatial_head(pairwise_spatial)
+            pairwise_spatial_reshaped = pairwise_spatial.reshape(n, n, -1)
+
+            box_pe, c_pe = self.compute_box_pe(boxes, embeds, image_sizes[i])
+            embeds, _ = self.encoder(embeds.unsqueeze(1), box_pe.unsqueeze(1))
+            embeds = embeds.squeeze(1)
+            # Compute human-object queries
+            ho_q = self.mmf(
+                torch.cat([embeds[x_keep], embeds[y_keep]], dim=1),
+                pairwise_spatial_reshaped[x_keep, y_keep]
+            )
+            # Append matched human-object pairs
+            ho_queries.append(ho_q)
+            paired_indices.append(torch.stack([x_keep, y_keep], dim=1))
+            prior_scores.append(compute_prior_scores(
+                x_keep, y_keep, scores, labels, self.num_verbs, self.training,
+                self.obj_to_verb
+            ))
+            object_types.append(labels[y_keep])
+            positional_embeds.append({
+                "centre": torch.cat([c_pe[x_keep], c_pe[y_keep]], dim=-1).unsqueeze(1),
+                "box": torch.cat([box_pe[x_keep], box_pe[y_keep]], dim=-1).unsqueeze(1)
+            })
+
+        return ho_queries, paired_indices, prior_scores, object_types, positional_embeds
 
 class HumanObjectMatcher(nn.Module):
     def __init__(self, repr_size, num_verbs, obj_to_verb, dropout=.1, human_idx=0):
@@ -170,7 +274,31 @@ class Permute(nn.Module):
         self.dims = dims
     def forward(self, x: Tensor) -> Tensor:
         return x.permute(self.dims)
+class FeatureHeadNoTaskSpecified(nn.Module):
+    def __init__(self, dim, dim_backbone, return_layer, num_layers):
+        super().__init__()
+        self.dim = dim
+        self.dim_backbone = dim_backbone
+        self.return_layer = return_layer
 
+        in_channel_list = [
+            int(dim_backbone * 2 ** i)
+            for i in range(return_layer + 1, 1)
+        ]
+        self.fpn = FeaturePyramidNetwork(in_channel_list, dim)
+        self.layers = nn.Sequential(
+            Permute([0, 2, 3, 1]),
+            SwinTransformer(dim, num_layers, 16)
+        )
+    def forward(self, x):
+        pyramid = OrderedDict(
+            (f"{i}", x[i].tensors)
+            for i in range(self.return_layer, 0)
+        )
+        mask = x[self.return_layer].mask
+        x = self.fpn(pyramid)[f"{self.return_layer}"]
+        x = self.layers(x)
+        return x, mask
 class FeatureHead(nn.Module):
     def __init__(self, dim, dim_backbone, return_layer, num_layers):
         super().__init__()
@@ -534,18 +662,18 @@ def build_detector(args, obj_to_verb):
             print(f"Load weights for the object detector from {args.pretrained}")
         detr.load_state_dict(torch.load(args.pretrained, map_location='cpu')['model_state_dict'])
 
-    ho_matcher = HumanObjectMatcher(
+    ho_matcher = HumanObjectMatcherNoTaskSpecified(
         repr_size=args.repr_dim,
         num_verbs=args.num_verbs,
         obj_to_verb=obj_to_verb,
         dropout=args.dropout
     )
-    decoder_layer = TransformerDecoderLayer(
+    decoder_layer = TransformerDecoderLayerNoTaskSpecified(
         q_dim=args.repr_dim, kv_dim=args.hidden_dim,
         ffn_interm_dim=args.repr_dim * 4,
         num_heads=args.nheads, dropout=args.dropout
     )
-    triplet_decoder = TransformerDecoder(
+    triplet_decoder = TransformerDecoderNoTaskSpecified(
         decoder_layer=decoder_layer,
         num_layers=args.triplet_dec_layers
     )
@@ -554,7 +682,7 @@ def build_detector(args, obj_to_verb):
         num_channels = detr.backbone.num_channels[-1]
     else:
         num_channels = detr.backbone.num_channels
-    feature_head = FeatureHead(
+    feature_head = FeatureHeadNoTaskSpecified(
         args.repr_dim, num_channels,
         return_layer, args.triplet_enc_layers
     )
