@@ -662,18 +662,18 @@ def build_detector(args, obj_to_verb):
             print(f"Load weights for the object detector from {args.pretrained}")
         detr.load_state_dict(torch.load(args.pretrained, map_location='cpu')['model_state_dict'])
 
-    ho_matcher = HumanObjectMatcherNoTaskSpecified(
+    ho_matcher = HumanObjectMatcher(
         repr_size=args.repr_dim,
         num_verbs=args.num_verbs,
         obj_to_verb=obj_to_verb,
         dropout=args.dropout
     )
-    decoder_layer = TransformerDecoderLayerNoTaskSpecified(
+    decoder_layer = TransformerDecoderLayer(
         q_dim=args.repr_dim, kv_dim=args.hidden_dim,
         ffn_interm_dim=args.repr_dim * 4,
         num_heads=args.nheads, dropout=args.dropout
     )
-    triplet_decoder = TransformerDecoderNoTaskSpecified(
+    triplet_decoder = TransformerDecoder(
         decoder_layer=decoder_layer,
         num_layers=args.triplet_dec_layers
     )
@@ -682,7 +682,7 @@ def build_detector(args, obj_to_verb):
         num_channels = detr.backbone.num_channels[-1]
     else:
         num_channels = detr.backbone.num_channels
-    feature_head = FeatureHeadNoTaskSpecified(
+    feature_head = FeatureHead(
         args.repr_dim, num_channels,
         return_layer, args.triplet_enc_layers
     )

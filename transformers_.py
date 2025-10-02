@@ -273,37 +273,36 @@ class TransformerDecoderLayer(nn.Module):
             h_query_dim = q_dim
             o_query_dim = q_dim
         self.h_query_adapter = nn.Sequential(
-            nn.Linear(h_query_dim, h_query_dim * 4),
+            nn.Linear(h_query_dim, ffn_interm_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(h_query_dim * 4, self.h_dim//2)
+            nn.Linear(ffn_interm_dim, q_dim),
+            nn.ReLU(),
+            nn.Linear(q_dim, self.h_dim // 2)
         )
         self.o_query_adapter = nn.Sequential(
-            nn.Linear(o_query_dim, o_query_dim * 4),
+            nn.Linear(o_query_dim, ffn_interm_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(o_query_dim * 4, self.o_dim//2)
+            nn.Linear(ffn_interm_dim, q_dim),
+            nn.ReLU(),
+            nn.Linear(q_dim, self.o_dim // 2)
         )
         
 
-        self.cls_pos_proj = nn.Sequential(
-            nn.Linear(kv_dim * 2 + kv_dim * 4, q_dim),
-            nn.ReLU(),
-            nn.Linear(q_dim, q_dim // num_heads // 2))
+        self.cls_pos_proj = nn.Linear(kv_dim * 2 + kv_dim * 4, q_dim // num_heads // 2)
         self.h_feature_proj = nn.Sequential(
-            nn.Linear(self.h_dim, self.h_dim * 4),
+            nn.Linear(self.h_dim, ffn_interm_dim),
             nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(self.h_dim * 4, self.h_dim//2)
+            nn.Linear(ffn_interm_dim, self.h_dim//2)
         )
         self.o_feature_proj = nn.Sequential(
-            nn.Linear(self.o_dim, self.o_dim * 4),
+            nn.Linear(self.o_dim, ffn_interm_dim),
             nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(self.o_dim * 4, self.o_dim//2)
+            nn.Linear(ffn_interm_dim, self.o_dim//2)
         )
-        self.backbone_pos_proj_h = nn.Linear(q_dim, self.h_dim // 2)
-        self.backbone_pos_proj_o = nn.Linear(q_dim, self.o_dim // 2)
+        self.backbone_pos_proj_h = nn.Sequential(nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, self.h_dim // 2))
+        self.backbone_pos_proj_o = nn.Sequential(nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, self.o_dim // 2))
 
         self.answer_proj = nn.Sequential(nn.Linear(q_dim, ffn_interm_dim), nn.ReLU(), nn.Linear(ffn_interm_dim, q_dim))
         self.clip_token_proj_h = nn.Sequential(
