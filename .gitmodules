@@ -1,15 +1,15 @@
 [submodule "hicodet"]
 	path = hicodet
-	url = https://github.com/CristinaZN/hicodet.git
+	url = https://github.com/lznnnnn1998/hicodet.git
 [submodule "vcoco"]
 	path = vcoco
-	url = https://github.com/CristinaZN/vcoco.git
+	url = https://github.com/lznnnnn1998/vcoco.git
 [submodule "pocket"]
 	path = pocket
-	url = https://github.com/CristinaZN/pocket.git
+	url = https://github.com/lznnnnn1998/pocket.git
 [submodule "detr"]
 	path = detr
-	url = https://github.com/CristinaZN/detr.git
+	url = https://github.com/lznnnnn1998/detr.git
 [submodule "h-detr"]
 	path = h_detr
-	url = https://github.com/CristinaZN/h-detr.git
+	url = https://github.com/lznnnnn1998/h-detr.git
