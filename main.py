@@ -44,11 +44,13 @@ def main(rank, args):
 
     trainset = DataFactory(
         name=args.dataset, partition=args.partitions[0],
-        data_root=args.data_root, llava_answer_path=args.llava_answer_path, llava_token_path=args.llava_token_path
+        data_root=args.data_root, llava_answer_path=args.llava_answer_path, llava_token_path=args.llava_token_path,
+        train_type=args.train_type
     )
     testset = DataFactory(
         name=args.dataset, partition=args.partitions[1],
-        data_root=args.data_root, llava_answer_path=args.llava_answer_path, llava_token_path=args.llava_token_path
+        data_root=args.data_root, llava_answer_path=args.llava_answer_path, llava_token_path=args.llava_token_path,
+        train_type=args.train_type
     )
 
     train_loader = DataLoader(
@@ -177,7 +179,7 @@ if __name__ == '__main__':
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--cache', action='store_true')
     parser.add_argument('--sanity', action='store_true')
-
+    parser.add_argument('--train-type', default='default', type=str, choices=['RF_UC', 'NF_UC', 'UV', 'UO'])
     args = parser.parse_args()
     print(args)
 

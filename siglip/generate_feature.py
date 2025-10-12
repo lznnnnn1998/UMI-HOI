@@ -3,8 +3,8 @@ import requests
 from transformers import AutoProcessor, AutoModel
 import torch
 import os
-folder_dir = "/home/Downloads/hico_20160224_det/images/test2015/"
-output_dir = "/home/MasterThesis/hico_siglip_feature/test/"
+folder_dir = "/home/MasterThesis/pvic/vcoco/mscoco2014/val2014/"
+output_dir = "/sda1-hdd/data_zhinan/vcoco_siglip_feature/val/"
 ckpt = "google/siglip2-giant-opt-patch16-384"
 model = AutoModel.from_pretrained(ckpt, device_map="cuda:1").eval()
 processor = AutoProcessor.from_pretrained(ckpt)

@@ -46,7 +46,7 @@ def custom_collate(batch):
     return images, targets, llava_answers, llava_features
 
 class DataFactory(Dataset):
-    def __init__(self, name, partition, data_root, llava_token_path, llava_answer_path):
+    def __init__(self, name, partition, data_root, llava_token_path, llava_answer_path, train_type):
         if name not in ['hicodet', 'vcoco']:
             raise ValueError("Unknown dataset ", name)
 
@@ -58,7 +58,8 @@ class DataFactory(Dataset):
                 anno_file=os.path.join(data_root, f"instances_{partition}.json"),
                 target_transform=pocket.ops.ToTensor(input_format='dict'),
                 llava_answer_path=llava_answer_path,
-                llava_token_path=llava_token_path
+                llava_token_path=llava_token_path,
+                train_type=train_type
             )
         else:
             assert partition in ['train', 'val', 'trainval', 'test'], \
@@ -246,17 +247,34 @@ class CustomisedDLE(DistributedLearningEngine):
             ap = self.test_hico()
             if self._rank == 0:
                 # Fetch indices for rare and non-rare classes
-                rare = self.test_dataloader.dataset.dataset.rare
-                non_rare = self.test_dataloader.dataset.dataset.non_rare
-                perf = [ap.mean().item(), ap[rare].mean().item(), ap[non_rare].mean().item()]
-                print(
-                    f"Epoch {self._state.epoch} =>\t"
-                    f"mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}."
-                )
-                wandb.log({
-                    "epochs": self._state.epoch, "mAP full": perf[0],
-                    "mAP rare": perf[1], "mAP non_rare": perf[2]
-                })
+                if self.test_dataloader.dataset.dataset.train_type == 'default':
+                    rare = self.test_dataloader.dataset.dataset.rare
+                    non_rare = self.test_dataloader.dataset.dataset.non_rare
+                    
+                    
+                    perf = [ap.mean().item(), ap[rare].mean().item(), ap[non_rare].mean().item()]
+                    print(
+                        f"Epoch {self._state.epoch} =>\t"
+                        f"mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}."
+                    )
+                    wandb.log({
+                        "epochs": self._state.epoch, "mAP full": perf[0],
+                        "mAP rare": perf[1], "mAP non_rare": perf[2]
+                    })
+                else:
+                    seen = self.test_dataloader.dataset.dataset.seen
+                    unseen = self.test_dataloader.dataset.dataset.unseen
+                    
+                    
+                    perf = [ap.mean().item(), ap[seen].mean().item(), ap[unseen].mean().item()]
+                    print(
+                        f"Epoch {self._state.epoch} =>\t"
+                        f"mAP: {perf[0]:.4f}, seen: {perf[1]:.4f}, unseen: {perf[2]:.4f}."
+                    )
+                    wandb.log({
+                        "epochs": self._state.epoch, "mAP full": perf[0],
+                        "mAP rare": perf[1], "mAP non_rare": perf[2]
+                    })
         else:
             ap = self.test_vcoco()
             if self._rank == 0:
@@ -283,9 +301,14 @@ class CustomisedDLE(DistributedLearningEngine):
                 checkpoint['scheduler_state_dict'] = self._state.lr_scheduler.state_dict()
             torch.save(checkpoint, os.path.join(self._cache_dir, f"epoch_{self._state.epoch}.pth"))
             if self._train_loader.dataset.name == "hicodet":
-                with open(os.path.join(self._cache_dir, "log.txt"), "a") as f:
-                    f.write(f"Epoch {self._state.epoch} => mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}.\n")
-                    f.close()
+                if self.test_dataloader.dataset.dataset.train_type == 'default':
+                    with open(os.path.join(self._cache_dir, "log.txt"), "a") as f:
+                        f.write(f"Epoch {self._state.epoch} => mAP: {perf[0]:.4f}, rare: {perf[1]:.4f}, none-rare: {perf[2]:.4f}.\n")
+                        f.close()
+                else:
+                    with open(os.path.join(self._cache_dir, "log.txt"), "a") as f:
+                        f.write(f"Epoch {self._state.epoch} => mAP: {perf[0]:.4f}, seen: {perf[1]:.4f}, unseen: {perf[2]:.4f}.\n")
+                        f.close()
             else:
                 with open(os.path.join(self._cache_dir, "log.txt"), "a") as f:
                     f.write(f"Epoch {self._state.epoch} => mAP: {perf[0]:.4f}.\n")
@@ -293,11 +316,11 @@ class CustomisedDLE(DistributedLearningEngine):
             if perf[0] > self.best_perf:
                 self.best_perf = perf[0]
                 torch.save(checkpoint, os.path.join(self._cache_dir, "best.pth"))
-        # if self._state.lr_scheduler is not None:
-        #     self._state.lr_scheduler.step()
-        if perf[0] > 0.4130 and self.steped==False:
+        if self._state.lr_scheduler is not None:
             self._state.lr_scheduler.step()
-            # self.steped = True
+        # if perf[0] > 0.4130 and self.steped==False:
+        #     self._state.lr_scheduler.step()
+        #     self.steped = True
 
     @torch.no_grad()
     def test_hico(self):
