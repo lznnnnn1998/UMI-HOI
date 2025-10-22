@@ -17,11 +17,13 @@ from collections import OrderedDict
 from typing import Optional, Tuple, List
 from torchvision.ops import FeaturePyramidNetwork
 
-from transformers_vis import (
+from transformers_ import (
     TransformerEncoder,
     TransformerDecoder,
     TransformerDecoderLayer,
     SwinTransformer,
+    TransformerDecoderNoTaskSpecified,
+    TransformerDecoderLayerNoTaskSpecified,
 )
 
 from ops import (
@@ -59,8 +61,7 @@ class MultiModalFusion(nn.Module):
         z = F.relu(torch.cat([x, y], dim=-1))
         z = self.mlp(z)
         return z
-
-class HumanObjectMatcher(nn.Module):
+class HumanObjectMatcherNoTaskSpecified(nn.Module):
     def __init__(self, repr_size, num_verbs, obj_to_verb, dropout=.1, human_idx=0):
         super().__init__()
         self.repr_size = repr_size
@@ -164,14 +165,116 @@ class HumanObjectMatcher(nn.Module):
 
         return ho_queries, paired_indices, prior_scores, object_types, positional_embeds
 
+class HumanObjectMatcher(nn.Module):
+    def __init__(self, repr_size, num_verbs, obj_to_verb, dropout=.1, human_idx=0):
+        super().__init__()
+        self.repr_size = repr_size
+        self.num_verbs = num_verbs
+        self.human_idx = human_idx
+        self.obj_to_verb = obj_to_verb
+
+        self.ref_anchor_head = nn.Sequential(
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 2)
+        )
+        self.spatial_head = nn.Sequential(
+            nn.Linear(36, 128), nn.ReLU(),
+            nn.Linear(128, 256), nn.ReLU(),
+            nn.Linear(256, repr_size), nn.ReLU(),
+        )
+        self.encoder = TransformerEncoder(num_layers=2, dropout=dropout)
+        self.h_mmf = MultiModalFusion(256, repr_size, repr_size//4 * 1)
+        self.o_mmf = MultiModalFusion(256, repr_size, repr_size//4 * 3)
+    def check_human_instances(self, labels):
+        is_human = labels == self.human_idx
+        n_h = torch.sum(is_human)
+        if not torch.all(labels[:n_h]==self.human_idx):
+            raise AssertionError("Human instances are not permuted to the top!")
+        return n_h
+
+    def compute_box_pe(self, boxes, embeds, image_size):
+        bx_norm = boxes / image_size[[1, 0, 1, 0]]
+        bx_c = (bx_norm[:, :2] + bx_norm[:, 2:]) / 2
+        b_wh = bx_norm[:, 2:] - bx_norm[:, :2]
+
+        c_pe = compute_sinusoidal_pe(bx_c[:, None], 20).squeeze(1)
+        wh_pe = compute_sinusoidal_pe(b_wh[:, None], 20).squeeze(1)
+
+        box_pe = torch.cat([c_pe, wh_pe], dim=-1)
+
+        # Modulate the positional embeddings with box widths and heights by
+        # applying different temperatures to x and y
+        ref_hw_cond = self.ref_anchor_head(embeds).sigmoid()    # n_query, 2
+        # Note that the positional embeddings are stacked as [pe(y), pe(x)]
+        c_pe[..., :128] *= (ref_hw_cond[:, 1] / b_wh[:, 1]).unsqueeze(-1)
+        c_pe[..., 128:] *= (ref_hw_cond[:, 0] / b_wh[:, 0]).unsqueeze(-1)
+
+        return box_pe, c_pe
+
+    def forward(self, region_props, image_sizes, device=None):
+        if device is None:
+            device = region_props[0]["hidden_states"].device
+
+        ho_queries = []
+        paired_indices = []
+        prior_scores = []
+        object_types = []
+        positional_embeds = []
+        for i, rp in enumerate(region_props):
+            boxes, scores, labels, embeds = rp.values()
+            nh = self.check_human_instances(labels)
+            n = len(boxes)
+            # Enumerate instance pairs
+            x, y = torch.meshgrid(
+                torch.arange(n, device=device),
+                torch.arange(n, device=device)
+            )
+            x_keep, y_keep = torch.nonzero(torch.logical_and(x != y, x < nh)).unbind(1)
+            # Skip image when there are no valid human-object pairs
+            if len(x_keep) == 0:
+                ho_queries.append(torch.zeros(0, self.repr_size, device=device))
+                paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
+                prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
+                object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
+                positional_embeds.append({})
+                continue
+            x = x.flatten(); y = y.flatten()
+            # Compute spatial features
+            pairwise_spatial = compute_spatial_encodings(
+                [boxes[x],], [boxes[y],], [image_sizes[i],]
+            )
+            pairwise_spatial = self.spatial_head(pairwise_spatial)
+            pairwise_spatial_reshaped = pairwise_spatial.reshape(n, n, -1)
+
+            box_pe, c_pe = self.compute_box_pe(boxes, embeds, image_sizes[i])
+            embeds, _ = self.encoder(embeds.unsqueeze(1), box_pe.unsqueeze(1))
+            embeds = embeds.squeeze(1)
+            # Compute human-object queries
+            h_q = self.h_mmf(embeds[x_keep], pairwise_spatial_reshaped[x_keep, y_keep])
+            o_q = self.o_mmf(embeds[y_keep], pairwise_spatial_reshaped[x_keep, y_keep])
+            ho_q = torch.cat((h_q, o_q), dim=-1)
+            # Append matched human-object pairs
+            ho_queries.append(ho_q)
+            paired_indices.append(torch.stack([x_keep, y_keep], dim=1))
+            prior_scores.append(compute_prior_scores(
+                x_keep, y_keep, scores, labels, self.num_verbs, self.training,
+                self.obj_to_verb
+            ))
+            object_types.append(labels[y_keep])
+            positional_embeds.append({
+                "centre": torch.cat([c_pe[x_keep], c_pe[y_keep]], dim=-1).unsqueeze(1),
+                "box": torch.cat([box_pe[x_keep], box_pe[y_keep]], dim=-1).unsqueeze(1)
+            })
+
+        return ho_queries, paired_indices, prior_scores, object_types, positional_embeds
+
 class Permute(nn.Module):
     def __init__(self, dims: List[int]):
         super().__init__()
         self.dims = dims
     def forward(self, x: Tensor) -> Tensor:
         return x.permute(self.dims)
-
-class FeatureHead(nn.Module):
+class FeatureHeadNoTaskSpecified(nn.Module):
     def __init__(self, dim, dim_backbone, return_layer, num_layers):
         super().__init__()
         self.dim = dim
@@ -185,7 +288,7 @@ class FeatureHead(nn.Module):
         self.fpn = FeaturePyramidNetwork(in_channel_list, dim)
         self.layers = nn.Sequential(
             Permute([0, 2, 3, 1]),
-            SwinTransformer(dim, num_layers)
+            SwinTransformer(dim, num_layers, 16)
         )
     def forward(self, x):
         pyramid = OrderedDict(
@@ -195,6 +298,36 @@ class FeatureHead(nn.Module):
         mask = x[self.return_layer].mask
         x = self.fpn(pyramid)[f"{self.return_layer}"]
         x = self.layers(x)
+        return x, mask
+class FeatureHead(nn.Module):
+    def __init__(self, dim, dim_backbone, return_layer, num_layers):
+        super().__init__()
+        self.dim = dim
+        self.dim_backbone = dim_backbone
+        self.return_layer = return_layer
+
+        self.h_mapping = nn.Sequential(
+            Permute([0, 2, 3, 1]),
+            nn.Linear(dim_backbone, dim_backbone//2), nn.ReLU(),
+            nn.Linear(dim_backbone//2, dim//4 * 1)
+        )
+        self.o_mapping = nn.Sequential(
+            Permute([0, 2, 3, 1]),
+            nn.Linear(dim_backbone, dim_backbone//2), nn.ReLU(),
+            nn.Linear(dim_backbone//2, dim//4 * 3)
+        )
+        self.h_layers = SwinTransformer(dim//4 * 1, num_layers, 4)
+
+        self.o_layers = SwinTransformer(dim//4 * 3, num_layers, 12)
+
+    def forward(self, x:List[NestedTensor]):
+
+        mask = x[self.return_layer].mask
+        x_h = self.h_mapping(x[self.return_layer].tensors)
+        x_o = self.o_mapping(x[self.return_layer].tensors)
+        x_h = self.h_layers(x_h)
+        x_o = self.o_layers(x_o)
+        x = torch.cat((x_h, x_o), dim=-1)
         return x, mask
 
 def inverse_sigmoid(x, eps=1e-5):
@@ -208,8 +341,8 @@ class PViC(nn.Module):
 
     def __init__(self,
         detector: Tuple[nn.Module, str], postprocessor: nn.Module,
-        feature_head: nn.Module, ho_matcher: nn.Module,
-        triplet_decoder: nn.Module, num_verbs: int,
+        feature_head: FeatureHead, ho_matcher: HumanObjectMatcher,
+        triplet_decoder: TransformerDecoder, num_verbs: int,
         repr_size: int = 384, human_idx: int = 0,
         # Focal loss hyper-parameters
         alpha: float = 0.5, gamma: float = .1,
@@ -222,6 +355,7 @@ class PViC(nn.Module):
         super().__init__()
 
         self.detector = detector[0]
+        self.detector_type = detector[1]
         self.od_forward = {
             "base": self.base_forward,
             "advanced": self.advanced_forward,
@@ -230,7 +364,7 @@ class PViC(nn.Module):
 
         self.ho_matcher = ho_matcher
         self.feature_head = feature_head
-        self.kv_pe = PositionEmbeddingSine(128, 20, normalize=True)
+        self.kv_pe = PositionEmbeddingSine(repr_size//2, 20, normalize=True)
         self.decoder = triplet_decoder
         self.binary_classifier = nn.Linear(repr_size, num_verbs)
 
@@ -354,7 +488,7 @@ class PViC(nn.Module):
             init_reference,
             inter_references,
             enc_outputs_class,
-            enc_outputs_coord_unact,
+            enc_outputs_coord_unact, memory
         ) = ctx.transformer(srcs, masks, pos, query_embeds, self_attn_mask)
 
         outputs_classes_one2one = []
@@ -398,7 +532,7 @@ class PViC(nn.Module):
                 "pred_logits": enc_outputs_class,
                 "pred_boxes": enc_outputs_coord,
             }
-        return out, hs, features
+        return out, hs, features, memory, masks, pos, ctx.transformer.level_embed
 
     def forward(self,
         images: List[Tensor],
@@ -439,9 +573,37 @@ class PViC(nn.Module):
         image_sizes = torch.as_tensor([im.size()[-2:] for im in images], device=images[0].device)
 
         with torch.no_grad():
-            results, hs, features = self.od_forward(self.detector, images)
+            if self.detector_type == "advanced":
+                results, hs, features, memory, masks, pos, level_embed = self.od_forward(self.detector, images)
+                # multi-scale:
+                # mask_flatten = []
+                # lvl_pos_embed_flatten = []
+                # for i, m in enumerate(masks):
+                #     mask_flatten.append(m.flatten(1))
+                #     pos_embed = pos[i].flatten(2).transpose(1, 2)
+                #     lvl_pos_embed = pos_embed + level_embed[i].view(1, 1, -1)
+                #     lvl_pos_embed_flatten.append(lvl_pos_embed)
+                # mask_flatten = torch.cat(mask_flatten, 1)
+                # lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
+                # kv_p_m = mask_flatten.unsqueeze(1)
+                # memory = features
+                # k_pos = lvl_pos_embed_flatten
+                # Compute keys/values for triplet decoder. only C5 layer
+                memory, mask = self.feature_head(features)
+                b, h, w, c = memory.shape
+                memory = memory.reshape(b, h * w, c)
+                kv_p_m = mask.reshape(-1, 1, h * w)
+                k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+            elif self.detector_type == "base":
+                results, hs, features = self.od_forward(self.detector, images)
+                # Compute keys/values for triplet decoder.
+                memory, mask = self.feature_head(features)
+                b, h, w, c = memory.shape
+                memory = memory.reshape(b, h * w, c)
+                kv_p_m = mask.reshape(-1, 1, h * w)
+                k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
             results = self.postprocessor(results, image_sizes)
-
+        
         region_props = prepare_region_proposals(
             results, hs[-1], image_sizes,
             box_score_thresh=self.box_score_thresh,
@@ -456,12 +618,7 @@ class PViC(nn.Module):
             paired_inds, prior_scores,
             object_types, positional_embeds
         ) = self.ho_matcher(region_props, image_sizes)
-        # Compute keys/values for triplet decoder.
-        memory, mask = self.feature_head(features)
-        b, h, w, c = memory.shape
-        memory = memory.reshape(b, h * w, c)
-        kv_p_m = mask.reshape(-1, 1, h * w)
-        k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        
         # Enhance visual context with triplet decoder.
         query_embeds = []
         for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
@@ -472,7 +629,7 @@ class PViC(nn.Module):
                 q_pos=positional_embeds[i],     # centre: (n, 1, 2*kv_dim), box: (n, 1, 4*kv_dim)
                 k_pos=k_pos[i],                 # (hw, 1, kv_dim)
                 llava_answer_idx=llava_answer[i],
-                llava_feature=llava_feature[i].transpose(0, 1)
+                llava_feature=llava_feature[i]#.transpose(0, 1)
             ).squeeze(dim=2))
         # Concatenate queries from all images in the same batch.
         query_embeds = torch.cat(query_embeds, dim=1)   # (ndec, \sigma{n}, q_dim)
@@ -492,7 +649,7 @@ class PViC(nn.Module):
         )
         return detections
 
-def build_detector(args, obj_to_verb):
+def build_detector(args, obj_to_verb) -> PViC:
     if args.detector == "base":
         detr, _, postprocessors = build_base_detr(args)
     elif args.detector == "advanced":
@@ -526,7 +683,7 @@ def build_detector(args, obj_to_verb):
     else:
         num_channels = detr.backbone.num_channels
     feature_head = FeatureHead(
-        args.hidden_dim, num_channels,
+        args.repr_dim, num_channels,
         return_layer, args.triplet_enc_layers
     )
     model = PViC(

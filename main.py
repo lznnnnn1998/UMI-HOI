@@ -179,10 +179,13 @@ if __name__ == '__main__':
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--cache', action='store_true')
     parser.add_argument('--sanity', action='store_true')
-    parser.add_argument('--train-type', default='default', type=str, choices=['RF_UC', 'NF_UC', 'UV', 'UO'])
+    parser.add_argument('--train-type', default='default', type=str, choices=['default', 'RF_UC', 'NF_UC', 'UV', 'UO'])
+    parser.add_argument('--sub-headnum', default=2, type=int, help='sub-headnum + obj-headnum = 8')
+    parser.add_argument('--obj-headnum', default=6, type=int, help='sub-headnum + obj-headnum = 8')
     args = parser.parse_args()
+    assert args.sub_headnum + args.obj_headnum == 8
     print(args)
-
+    
     if args.sanity:
         sanity_check(args)
         sys.exit()

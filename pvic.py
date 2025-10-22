@@ -166,7 +166,7 @@ class HumanObjectMatcherNoTaskSpecified(nn.Module):
         return ho_queries, paired_indices, prior_scores, object_types, positional_embeds
 
 class HumanObjectMatcher(nn.Module):
-    def __init__(self, repr_size, num_verbs, obj_to_verb, dropout=.1, human_idx=0):
+    def __init__(self, repr_size, num_verbs, obj_to_verb, dropout=.1, human_idx=0, sub_headnum=2, obj_headnum=6):
         super().__init__()
         self.repr_size = repr_size
         self.num_verbs = num_verbs
@@ -183,8 +183,8 @@ class HumanObjectMatcher(nn.Module):
             nn.Linear(256, repr_size), nn.ReLU(),
         )
         self.encoder = TransformerEncoder(num_layers=2, dropout=dropout)
-        self.h_mmf = MultiModalFusion(256, repr_size, repr_size//4 * 1)
-        self.o_mmf = MultiModalFusion(256, repr_size, repr_size//4 * 3)
+        self.h_mmf = MultiModalFusion(256, repr_size, repr_size//8 * sub_headnum)
+        self.o_mmf = MultiModalFusion(256, repr_size, repr_size//8 * obj_headnum)
     def check_human_instances(self, labels):
         is_human = labels == self.human_idx
         n_h = torch.sum(is_human)
@@ -300,7 +300,7 @@ class FeatureHeadNoTaskSpecified(nn.Module):
         x = self.layers(x)
         return x, mask
 class FeatureHead(nn.Module):
-    def __init__(self, dim, dim_backbone, return_layer, num_layers):
+    def __init__(self, dim, dim_backbone, return_layer, num_layers, sub_headnum=2, obj_headnum=6):
         super().__init__()
         self.dim = dim
         self.dim_backbone = dim_backbone
@@ -309,16 +309,16 @@ class FeatureHead(nn.Module):
         self.h_mapping = nn.Sequential(
             Permute([0, 2, 3, 1]),
             nn.Linear(dim_backbone, dim_backbone//2), nn.ReLU(),
-            nn.Linear(dim_backbone//2, dim//4 * 1)
+            nn.Linear(dim_backbone//2, dim//8 * sub_headnum)
         )
         self.o_mapping = nn.Sequential(
             Permute([0, 2, 3, 1]),
             nn.Linear(dim_backbone, dim_backbone//2), nn.ReLU(),
-            nn.Linear(dim_backbone//2, dim//4 * 3)
+            nn.Linear(dim_backbone//2, dim//8 * obj_headnum)
         )
-        self.h_layers = SwinTransformer(dim//4 * 1, num_layers, 4)
+        self.h_layers = SwinTransformer(dim//8 * sub_headnum, num_layers, 2 * sub_headnum)
 
-        self.o_layers = SwinTransformer(dim//4 * 3, num_layers, 12)
+        self.o_layers = SwinTransformer(dim//8 * obj_headnum, num_layers, 2 * obj_headnum)
 
     def forward(self, x:List[NestedTensor]):
 
@@ -666,12 +666,14 @@ def build_detector(args, obj_to_verb):
         repr_size=args.repr_dim,
         num_verbs=args.num_verbs,
         obj_to_verb=obj_to_verb,
-        dropout=args.dropout
+        dropout=args.dropout,
+        sub_headnum=args.sub_headnum, obj_headnum=args.obj_headnum
     )
     decoder_layer = TransformerDecoderLayer(
         q_dim=args.repr_dim, kv_dim=args.hidden_dim,
         ffn_interm_dim=args.repr_dim * 4,
-        num_heads=args.nheads, dropout=args.dropout
+        num_heads=args.nheads, dropout=args.dropout,
+        sub_headnum=args.sub_headnum, obj_headnum=args.obj_headnum
     )
     triplet_decoder = TransformerDecoder(
         decoder_layer=decoder_layer,
@@ -684,7 +686,8 @@ def build_detector(args, obj_to_verb):
         num_channels = detr.backbone.num_channels
     feature_head = FeatureHead(
         args.repr_dim, num_channels,
-        return_layer, args.triplet_enc_layers
+        return_layer, args.triplet_enc_layers,
+        sub_headnum=args.sub_headnum, obj_headnum=args.obj_headnum
     )
     model = PViC(
         (detr, args.detector), postprocessors['bbox'],
