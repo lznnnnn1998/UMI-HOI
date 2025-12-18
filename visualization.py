@@ -68,6 +68,11 @@ def visualise_entire_image(
     backbone_token_end = cls_token_end + attn_meta['num_backbone_token']
     clip_token_start = backbone_token_end
     clip_token_end = backbone_token_end + attn_meta['num_clip_token'] - 1
+    # that "1" is clip cls token
+    answer_token_start = clip_token_end + 1
+    answer_token_end = clip_token_end + 1 + attn_meta['num_answer_token']
+    reg_token_start = answer_token_end
+    
     # Visualise detected human-object pairs with attached scores
     attn_type = 'HO_backbone_attn'
     if action is not None:
@@ -144,6 +149,7 @@ def visualise_entire_image(
         plt.gca().yaxis.set_major_locator(plt.NullLocator())
         plt.savefig(save_folder+image_name.replace('jpg', 'png'), bbox_inches="tight", pad_inches=0)
         plt.close() 
+        attn_type = "VLM_V_attn"
         for i in keep:
             ho_pair_idx = output["x"][i]
             attn_map = attn[:, ho_pair_idx, clip_token_start:clip_token_end].reshape(8, 24, 24) # resolution 384, patch_size = 16
@@ -154,14 +160,7 @@ def visualise_entire_image(
             activated_ids = torch.where(attn_map_activated==1)[0].cpu()
             pocket.utils.draw_boxes(attn_image, torch.stack([bx_h[i], bx_o[i]]), width=4)
             _w, _h = attn_image.size
-            attn_map = F.interpolate(attn_map.unsqueeze(1), size=(_h, _w), mode='bicubic').squeeze(1)
-            # attn_map = F.interpolate(attn_map.unsqueeze(1), size=(384, 384), mode='bicubic').squeeze(1)
-            # new_attn_map = torch.zeros((8,_h, _w))
-            # for ii in range(8):
-            #     attn_map_pil = ToPILImage()(attn_map[ii])
-            #     attn_map_pil = attn_map_pil.resize((_w, _h))
-            #     new_attn_map[ii] = ToTensor()(attn_map_pil)[0]
-            # attn_map = new_attn_map
+            attn_map = F.interpolate(attn_map.unsqueeze(1), size=(_h, _w), mode='bilinear').squeeze(1)
             # draw average attn
             pocket.advis.heatmap(attn_image, attn_map[activated_ids].mean(0, keepdim=True).cpu(), save_path=save_folder+f"pair_{i}_{attn_type}_avg_attn.png")
             plt.close()
@@ -172,8 +171,100 @@ def visualise_entire_image(
                 else:
                     flag = 'nonAct'
                 pocket.advis.heatmap(attn_image, attn_map[j: j+1].cpu(), save_path=save_folder+f"pair_{i}_{attn_type}_head_{j+1}_{flag}.png")
-                plt.close() 
-    
+                plt.close()
+        attn_type = "backbone_attn"
+        for i in keep:
+            ho_pair_idx = output["x"][i]
+            attn_map = attn[:, ho_pair_idx, backbone_token_start:backbone_token_end]
+            attn_map = attn_map.softmax(-1).reshape(8, math.ceil(h / 32), math.ceil(w / 32))
+            contrast_factor = 4
+            mean_ = attn_map.mean(dim=(-1, -2), keepdim=True)
+            attn_map = contrast_factor * (attn_map - mean_) + mean_
+            
+            attn_image = image_copy.copy()
+            attn_map_haed_std = attn_map.flatten(1).std(1)
+            attn_map_th = attn_map_haed_std.sum() / 8
+            attn_map_activated = (attn_map_haed_std >= attn_map_th).long()
+            activated_ids = torch.where(attn_map_activated==1)[0].cpu()
+            pocket.utils.draw_boxes(attn_image, torch.stack([bx_h[i], bx_o[i]]), width=4)
+            _w, _h = attn_image.size
+            attn_map = F.interpolate(attn_map.unsqueeze(1), size=(_h, _w), mode='bilinear').squeeze(1)
+            # draw average attn
+            pocket.advis.heatmap(attn_image, attn_map[activated_ids].mean(0, keepdim=True).cpu(), save_path=save_folder+f"pair_{i}_{attn_type}_avg_attn.png")
+            plt.close()
+            # draw each head's attn
+            for j in range(8):
+                if attn_map_activated[j] == 1:
+                    flag = 'Act'
+                else:
+                    flag = 'nonAct'
+                pocket.advis.heatmap(attn_image, attn_map[j: j+1].cpu(), save_path=save_folder+f"pair_{i}_{attn_type}_head_{j+1}_{flag}.png")
+                plt.close()
+        # draw text attention
+        attn_type = 'VLM_T_attn'
+        keep = torch.nonzero(scores >= thresh).squeeze(1)
+        detect_results_ids = []
+        detect_results = []
+        for i in keep:
+            if output["labels"][i] not in detect_results_ids:
+                detect_results_ids.append(output["labels"][i])
+        for _ids in detect_results_ids:
+            detect_results.append(dataset.dataset._verbs[_ids])
+        for i in keep:
+            ho_pair_idx = output["x"][i]
+            detect_result = dataset.dataset._verbs[output["labels"][i]]
+            attn_map = attn[:, ho_pair_idx, answer_token_start:answer_token_end]
+            attn_map_haed_std = attn_map.flatten(1).std(1)
+            attn_map_th = attn_map_haed_std.sum() / 8
+            attn_map_activated = (attn_map_haed_std >= attn_map_th).long()
+            flags = []
+            for j in range(8):
+                if attn_map_activated[j] == 1:
+                    flags.append('Activated')
+                else:
+                    flags.append('Non-activated')
+            plt.clf()
+            seaborn.heatmap(attn_map.cpu(), xticklabels=llava_answer, yticklabels=flags)
+            plt.title("GT:" + str(verb_gt).strip('[]') + '\n' + 
+                      "Inference all: " + str(detect_results).strip('[]') + '\n' + 
+                      "Inference this:" + detect_result)
+            plt.xlabel("Verbs from VLM")
+            plt.ylabel("Status of Heads")
+            plt.tight_layout()
+            plt.savefig(save_folder+f"pair_{i}_{attn_type}.png", bbox_inches='tight')
+            plt.close()
+        # draw reg attention
+        attn_type = 'REG_attn'
+        keep = torch.nonzero(scores >= thresh).squeeze(1)
+        detect_results_ids = []
+        detect_results = []
+        for i in keep:
+            if output["labels"][i] not in detect_results_ids:
+                detect_results_ids.append(output["labels"][i])
+        for _ids in detect_results_ids:
+            detect_results.append(dataset.dataset._verbs[_ids])
+        for i in keep:
+            ho_pair_idx = output["x"][i]
+            detect_result = dataset.dataset._verbs[output["labels"][i]]
+            attn_map = attn[:, ho_pair_idx, reg_token_start:]
+            attn_map_haed_std = attn_map.flatten(1).std(1)
+            attn_map_th = attn_map_haed_std.sum() / 8
+            attn_map_activated = (attn_map_haed_std >= attn_map_th).long()
+            flags = []
+            for j in range(8):
+                if attn_map_activated[j] == 1:
+                    flags.append('Activated')
+                else:
+                    flags.append('Non-activated')
+            plt.clf()
+            seaborn.heatmap(attn_map.cpu(), xticklabels="auto", yticklabels=flags)
+            plt.title(f"Attention to Registers\n" \
+            f"Inference: {detect_result}")
+            plt.xlabel("Register Indices")
+            plt.ylabel("Status of Heads")
+            plt.tight_layout()
+            plt.savefig(save_folder+f"pair_{i}_{attn_type}.png", bbox_inches='tight')
+            plt.close()
 @torch.no_grad()
 def main(args):
     
@@ -342,5 +433,7 @@ if __name__ == "__main__":
     parser.add_argument('--llava-token-path', type=str)
     parser.add_argument('--example-num', default=1, type=int)
     parser.add_argument('--train-type', default='default', type=str, choices=['default', 'RF_UC', 'NF_UC', 'UV', 'UO'])
+    parser.add_argument('--sub-headnum', default=5, type=int, help='sub-headnum + obj-headnum = 8')
+    parser.add_argument('--obj-headnum', default=3, type=int, help='sub-headnum + obj-headnum = 8')
     args = parser.parse_args()
     main(args)

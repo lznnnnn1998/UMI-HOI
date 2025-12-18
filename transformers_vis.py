@@ -234,7 +234,7 @@ class TopkMoE(nn.Module):
 
 class TransformerDecoderLayer(nn.Module):
 
-    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1, layer_id=0):
+    def __init__(self, q_dim, kv_dim, num_heads, ffn_interm_dim, dropout=0.1, layer_id=0, sub_headnum=2, obj_headnum=6):
         """
         Parameters:
         -----------
@@ -255,10 +255,10 @@ class TransformerDecoderLayer(nn.Module):
         self.kv_dim = kv_dim
         self.num_heads = num_heads
         self.inter_head_dim = 32
-        self.h_dim = q_dim // 4
-        self.o_dim = q_dim // 4 * 3
-        self.h_head_num = 2
-        self.o_head_num = num_heads - 2
+        self.h_dim = q_dim // 8 * sub_headnum
+        self.o_dim = q_dim // 8 * obj_headnum
+        self.h_head_num = sub_headnum
+        self.o_head_num = obj_headnum
         self.dropout = dropout
         self.ffn_interm_dim = ffn_interm_dim
         self.layer_id = layer_id
@@ -394,9 +394,6 @@ class TransformerDecoderLayer(nn.Module):
         q_p = q_p.unsqueeze(-2)
         q_h = torch.cat((q_h, q_p.repeat(1,1,self.h_head_num, 1)), dim=-1).view(n_q, bs, self.h_dim)
         q_o = torch.cat((q_o, q_p.repeat(1,1,self.o_head_num, 1)), dim=-1).view(n_q, bs, self.o_dim)
-        # q_p = q_p.view(n_q, bs, self.num_heads, self.q_dim // 2 // self.num_heads)
-        # q_h = torch.cat((q_h, q_p[:, :, :self.h_head_num]), dim=-1).view(n_q, bs, self.h_dim)
-        # q_o = torch.cat((q_o, q_p[:, :, self.h_head_num:]), dim=-1).view(n_q, bs, self.o_dim)
         cls_token = torch.cat([q_h, q_o], dim=-1)
         num_cls_token = len(cls_token)
 
@@ -466,7 +463,8 @@ class TransformerDecoder(nn.Module):
             layers.append(
                 TransformerDecoderLayer(
                     decoder_layer.q_dim, decoder_layer.kv_dim, 
-                    decoder_layer.num_heads, decoder_layer.ffn_interm_dim, layer_id=i))
+                    decoder_layer.num_heads, decoder_layer.ffn_interm_dim, layer_id=i, 
+                    sub_headnum=decoder_layer.h_head_num, obj_headnum=decoder_layer.o_head_num))
         self.layers = nn.ModuleList(layers)
         self.num_layers = num_layers
         self.norm = nn.LayerNorm(decoder_layer.q_dim)
