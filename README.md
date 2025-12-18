@@ -23,8 +23,8 @@ This repository contains the official PyTorch implementation for the paper
     pip install numpy==1.24.1 timm==0.6.12
     pip install wandb==0.13.9 seaborn==0.13.0
     # Clone the repo and submodules
-    git clone https://github.com/fredzzhang/pvic.git
-    cd pvic
+    git clone https://github.com/lznnnnn1998/pvic_llava
+    cd pvic_llava
     git submodule init
     git submodule update
     pip install -e pocket
@@ -54,7 +54,22 @@ This repository contains the official PyTorch implementation for the paper
         cd /path/to/pvic/vcoco
         ln -s /path/to/coco ./mscoco2014
         ```
+4. Prepare the LLaVA features:
+    ```bash
+    git clone https://github.com/haotian-liu/LLaVA.git
+    cd LLaVA
+    ```
 
+    ```Shell
+    conda create -n llava python=3.10 -y
+    conda activate llava
+    pip install --upgrade pip  # enable PEP 660 support
+    pip install -e .
+    ```
+
+    ```bash
+    python predict.py
+    ```
 ## Inference
 
 Visualisation utilities are implemented to run inference on a single image and visualise the cross-attention weights. A [reference model](https://drive.google.com/file/d/12ow476JpjrRNGMRd1f2DN_YJTOqtaOly/view?usp=sharing) is provided for demonstration purpose if you don't want to train a model yourself. Download the model and save it to `./checkpoints/`. Use the argument `--index` to select images and `--action` to specify the action index. Refer to the [lookup table](https://github.com/fredzzhang/upt/blob/main/assets/actions.txt) for action indices.
