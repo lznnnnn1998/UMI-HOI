@@ -70,6 +70,12 @@ This repository contains the official PyTorch implementation for the paper
     ```bash
     python predict.py
     ```
+5. Prepare the Siglipv2 features:
+  Install corresponding package `transformer` for siglipv2. Then modify the file in your installed package (See pvic_llava/siglip/modified_forward.py)
+
+    ```bash
+    python pvic_llava/siglip/modified_forward.py
+    ```
 ## Inference
 
 Visualisation utilities are implemented to run inference on a single image and visualise the cross-attention weights. A [reference model](https://drive.google.com/file/d/12ow476JpjrRNGMRd1f2DN_YJTOqtaOly/view?usp=sharing) is provided for demonstration purpose if you don't want to train a model yourself. Download the model and save it to `./checkpoints/`. Use the argument `--index` to select images and `--action` to specify the action index. Refer to the [lookup table](https://github.com/fredzzhang/upt/blob/main/assets/actions.txt) for action indices.
