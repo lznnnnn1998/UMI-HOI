@@ -210,7 +210,7 @@ def visualise_entire_image(
 def main(args):
     
     dataset = DataFactory(name=args.dataset, partition=args.partition, data_root=args.data_root, 
-                          llava_answer_path=args.llava_answer_path, llava_token_path=args.llava_token_path)
+                          llava_answer_path=args.llava_answer_path, llava_token_path=args.llava_token_path, train_type="default")
     conversion = dataset.dataset.object_to_verb if args.dataset == 'hicodet' \
         else list(dataset.dataset.object_to_action.values())
     args.num_verbs = 117 if args.dataset == 'hicodet' else 24
