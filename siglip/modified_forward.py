@@ -1,4 +1,4 @@
-# replace the get_image_features in the package transformer.models.siglip2.modeling_siglip2 with the following one.
+# replace the get_image_features in the package transformer.models.siglip2.[modeling_siglip2/modular_siglip2] with the following one.
 
 def get_image_features(
         self,

@@ -12,6 +12,16 @@ Fred Zhang <frederic.zhang@anu.edu.au>
 
 The Australian National University
 Microsoft Research Asia
+
+===================================================
+
+The semantic MHA and unified token are composed in TransformerDecoderLayer
+
+Zhinan Li <zhinan.li@tum.de>
+
+Technical University of Munich
+
+
 """
 import copy
 import math

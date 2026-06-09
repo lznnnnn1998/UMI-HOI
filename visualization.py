@@ -1,11 +1,11 @@
 """
 Visualise detected human-object interactions and
-the cross-attention weights.
+the cross-attention weights for SMHA, Register, self-attns.
 
-Fred Zhang <frederic.zhang@anu.edu.au>
+Zhinan Li <zhinan.li@tum.de>
 
-The Australian National University
-Australian Centre for Robotic Vision
+Technical University of Munich
+
 """
 
 import os
