@@ -78,13 +78,12 @@ This repository contains the official PyTorch implementation for the paper
     ```
 ## Visualization
 
-Visualisation utilities are implemented to run inference on a single image and visualise the cross-attention weights. A [reference model](https://drive.google.com/file/d/12ow476JpjrRNGMRd1f2DN_YJTOqtaOly/view?usp=sharing) is provided for demonstration purpose if you don't want to train a model yourself. Download the model and save it to `./checkpoints/`. Use the argument `--index` to select images and `--action` to specify the action index. Refer to the [lookup table](https://github.com/fredzzhang/upt/blob/main/assets/actions.txt) for action indices.
+Take a inference and visualize a dataset. The visualized attention will be stored according to their properties in the folder `./visualization/...`
 
 ```bash
 DETR=base python visualization.py --llava-answer-path llava_text_folder --llava-token-path llava_token_folder --batch-size 1 --index start_idx --action-score-thresh 0.2 --example-num num_of_images --avg-attn --repr-dim 512 --resume your_checkpoint
 ```
 
-Take a inference and visualize a dataset. The visualized attention will be stored according to their properties in the folder `./visualization/...`
 
 <img src="./figure/qualitative_v2.jpg" align="center">&nbsp;&nbsp;
 
