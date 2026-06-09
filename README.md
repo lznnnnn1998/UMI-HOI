@@ -4,6 +4,8 @@ This repository contains the official PyTorch implementation for the paper
 > "UMI-HOI: Unifying Multimodal Information with Semantic Multi-Head Attention for Human-Object Interaction Detection", Yuankai Wu*, Zhinan Li*, Constantin Patsch, Marsil Zakour, Driton Salihu, Eckehard Steinbach; Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) Findings, 2026, pp. 5999-6008
 
 \[[__paper__](https://openaccess.thecvf.com/content/CVPR2026F/html/Wu_UMI-HOI_Unifying_Multimodal_Information_with_Semantic_Multi-Head_Attention_for_Human-Object_CVPRF_2026_paper.html)\]
+
+
 <img src="./figure/overview_v2.png" align="center" height=200>&nbsp;&nbsp;
 <img src="./figure/smha_v1.png" align="center" height=150>&nbsp;&nbsp;
 ## Abstract
