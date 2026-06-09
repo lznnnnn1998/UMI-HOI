@@ -1,4 +1,4 @@
-# PViC: Predicate Visual Context
+# UMI-HOI: Unifying Multimodal Information with Semantic Multi-Head Attention for Human-Object Interaction Detection
 
 This repository contains the official PyTorch implementation for the paper 
 > "UMI-HOI: Unifying Multimodal Information with Semantic Multi-Head Attention for Human-Object Interaction Detection", Yuankai Wu*, Zhinan Li*, Constantin Patsch, Marsil Zakour, Driton Salihu, Eckehard Steinbach; Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) Findings, 2026, pp. 5999-6008
