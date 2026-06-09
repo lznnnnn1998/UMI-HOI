@@ -6,11 +6,12 @@ This repository contains the official PyTorch implementation for the paper
 \[[__paper__](https://openaccess.thecvf.com/content/CVPR2026F/html/Wu_UMI-HOI_Unifying_Multimodal_Information_with_Semantic_Multi-Head_Attention_for_Human-Object_CVPRF_2026_paper.html)\]
 
 
-<img src="./figure/overview_v2.png" align="center" height=200>&nbsp;&nbsp;
-<img src="./figure/smha_v1.png" align="center" height=150>&nbsp;&nbsp;
+<img src="./figure/overview_v2.png" align="center">&nbsp;&nbsp;
+
 ## Abstract
 > Human-Object Interaction (HOI) detection has become a central task in computer vision, focusing on a deeper understanding of human activities. In previous work, most efforts focused on detecting HOI using isolated image information. With technological advancements, recent studies have increasingly explored large language models and text features. Although most of the existing approaches involve simple fusion of CLIP and image features, they lack granularity in framework exploration. To address this issue, we introduce a Unified architecture for Multimodal Information fusion (UMI-HOI), which jointly leverages visual embeddings and textual representations from the Vision Language Model (VLM) to enhance interaction reasoning. Unlike prior works where the learning process for HOI detection is largely unstructured, UMI-HOI explicitly defines the semantic roles of each attention head, yielding a novel Semantic Multi-head Attention Mechanism (S-MHA) that enables structured multi-modal representation learning. Our experimental results on two public benchmarks demonstrate that UMI-HOI not only achieves state-of-the-art performance in the supervised setting, but also shows remarkable generalization ability under zero-shot scenarios, highlighting the effectiveness of the proposed multi-modal fusion framework.
 
+<img src="./figure/smha_v1.png" align="center">&nbsp;&nbsp;
 ## Prerequisites
 
 1. Use the package management tool of your choice and run the following commands after creating your environment. 
