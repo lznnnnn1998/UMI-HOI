@@ -1,0 +1,23 @@
+# Core Deep Learning
+torch==2.1.2
+torchvision==0.16.2
+
+# Transformers & Vision Models
+transformers==4.37.2
+einops==0.6.1
+
+# Data & Numerical
+numpy==1.26.4
+scipy==1.15.3
+scikit-learn==1.2.2
+
+# Image Processing
+pillow==10.4.0
+pycocotools==2.0.10
+
+# Visualization & Logging
+matplotlib==3.10.3
+tensorboard>=2.12.0
+
+# Utilities
+tqdm==4.67.1
