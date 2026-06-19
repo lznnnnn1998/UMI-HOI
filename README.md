@@ -54,9 +54,9 @@ This repository contains the official PyTorch implementation for the paper
         cd /path/to/pvic/vcoco
         ln -s /path/to/coco ./mscoco2014
         ```
-4. Prepare the LLaVA features (you can download provided test feature or generate it by yourself):
+4. Prepare the LLaVA text output (you can download provided test feature or generate it by yourself):
     ```bash
-    git clone https://github.com/haotian-liu/LLaVA.git
+    git clone https://github.com/lznnnnn1998/llava.git
     cd LLaVA
     ```
 
@@ -68,10 +68,11 @@ This repository contains the official PyTorch implementation for the paper
     ```
 
     ```bash
-    python predict.py
+    python predict.py # for hico-det
+    python predict_vcoco.py # for vcoco
     ```
 5. Prepare the Siglipv2 features:
-  Install corresponding package `transformer` for siglipv2. Then modify the file in your installed package (See pvic_llava/siglip/modified_forward.py)
+  Install corresponding package `transformer==4.37.2` for siglipv2. Then modify the file in your installed package (See pvic_llava/siglip/modified_forward.py)
 
     ```bash
     python pvic_llava/siglip/generate_feature.py
