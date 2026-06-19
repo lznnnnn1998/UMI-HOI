@@ -102,7 +102,7 @@ If you find our work useful for your research, please consider citing us:
 
 ```bibtex
 @inproceedings{WuLi2026UMIHOI,
-  author    = {Wu, Yuankai. and Li Zhinan and Constantin Patsch and Marsil Zakour and Driton Salihu and Eckehard Steinbach},
+  author    = {Wu, Yuankai* and Li Zhinan* and Constantin Patsch and Marsil Zakour and Driton Salihu and Eckehard Steinbach},
   title     = {UMI-HOI: Unifying Multimodal Information with Semantic Multi-Head Attention for Human-Object Interaction Detection},
   booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) Findings},
   year      = {2026},
