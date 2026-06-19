@@ -54,7 +54,7 @@ This repository contains the official PyTorch implementation for the paper
         cd /path/to/pvic/vcoco
         ln -s /path/to/coco ./mscoco2014
         ```
-4. Prepare the LLaVA text output (you can download provided test feature or generate it by yourself):
+4. Prepare the LLaVA vision/text output (you can download provided test feature or generate it by yourself):
     ```bash
     git clone https://github.com/lznnnnn1998/llava.git
     cd LLaVA
@@ -71,7 +71,7 @@ This repository contains the official PyTorch implementation for the paper
     python predict.py # for hico-det
     python predict_vcoco.py # for vcoco
     ```
-5. Prepare the Siglipv2 features:
+5. Replace the CLIP feature from LLaVA with Siglipv2 features:
   Install corresponding package `transformer==4.37.2` for siglipv2. Then modify the file in your installed package (See pvic_llava/siglip/modified_forward.py)
 
     ```bash
